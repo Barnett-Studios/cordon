@@ -1,0 +1,32 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Actions pinned to commit SHAs (never @vN — tags are mutable). No Dependabot.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: shellcheck the wrapper
+        run: shellcheck bin/cordon-run.sh
+      - name: install test deps
+        run: python3 -m pip install --quiet pytest
+      - name: structural test (no Docker)
+        run: python3 -m pytest tests/test_cordon_run_script.py -q
+      - name: build runtime image
+        run: docker build -f docker/runtime.Dockerfile -t cordon-runtime:ci .
+      - name: live smoke (blocked egress + bounded OOM-kill)
+        env:
+          CORDON_LIVE_SMOKES: '1'
+          CORDON_IMAGE: cordon-runtime:ci
+        run: python3 -m pytest tests/test_cordon_live_smoke.py -q
