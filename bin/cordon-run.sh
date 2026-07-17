@@ -16,6 +16,9 @@
 # Only the RESOURCE ceilings ("limits" in the contract) are tunable, via env, with
 # the ADR-0040 hardened defaults:
 #   CORDON_MEMORY (default 2g) · CORDON_CPUS (default 2) · CORDON_PIDS (default 512)
+# --memory-swap is pinned equal to --memory so the memory ceiling is a HARD limit:
+# without it Docker grants swap up to 2x --memory, letting a runaway allocation
+# escape the ceiling (up to 2x) on any host with swap instead of being OOM-killed.
 
 set -euo pipefail
 
@@ -42,6 +45,7 @@ docker run \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --memory "$CORDON_MEMORY" \
+  --memory-swap "$CORDON_MEMORY" \
   --cpus "$CORDON_CPUS" \
   --pids-limit "$CORDON_PIDS" \
   -u 1000:1000 \
