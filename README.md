@@ -1,5 +1,9 @@
 # cordon
 
+[![CI](https://github.com/Barnett-Studios/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/Barnett-Studios/cordon/actions/workflows/ci.yml)
+[![Container](https://img.shields.io/badge/ghcr.io-cordon-blue?logo=docker)](https://github.com/Barnett-Studios/cordon/pkgs/container/cordon)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 **Run one command inside a hardened, ephemeral, network-isolated container — so a
 runaway or buggy process becomes a bounded, classified failure, not a hang or an escape.**
 
@@ -52,3 +56,18 @@ non-root `-u 1000:1000`, so the image needs no baked-in user).
   seam wired, no security flag parameterized away. No Docker needed.
 - `tests/test_cordon_live_smoke.py` — opt-in (`CORDON_LIVE_SMOKES=1`): observes a blocked
   egress and a bounded OOM-kill against a live daemon.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Unless you explicitly state otherwise, any contribution you intentionally submit for
+inclusion in the work shall be dual-licensed as above, without any additional terms.
+
+---
+
+Built by [Barnett Studios](https://barnett-studios.com/) — part of the agentic-harness
+toolkit: [cxpak](https://github.com/Barnett-Studios/cxpak) ·
+[commitward](https://github.com/Barnett-Studios/commitward) ·
+[cascadr](https://github.com/Barnett-Studios/cascadr) ·
+[abproof](https://github.com/Barnett-Studios/abproof) · **cordon** ·
+[planner](https://github.com/Barnett-Studios/planner).
