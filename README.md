@@ -16,8 +16,7 @@ that takes the whole batch down with it.
 
 It is a *right-sized* boundary for a **single-user** harness running code its **own**
 cascade generated against the user's **own** disposable repo — not a microVM built to
-defend against a hostile co-tenant (see [`CONTRACT.md`](CONTRACT.md) → threat model, and
-ADR-0040).
+defend against a hostile co-tenant (see [`CONTRACT.md`](CONTRACT.md) → threat model).
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · abproof ·
 > cascadr · **cordon** · …
@@ -33,7 +32,7 @@ bin/cordon-run.sh /path/to/worktree cordon-runtime:local sh -c "pytest -q"
 ```
 
 stdout/stderr and the exit code are the command's own. Tune the ceilings via env
-(defaults are the ADR-0040 hardened values):
+(defaults are the hardened values):
 
 ```sh
 CORDON_MEMORY=4g CORDON_CPUS=4 CORDON_PIDS=1024 \

@@ -36,10 +36,10 @@ literal. `tests/test_cordon_run_script.py` enforces both halves statically.
 
 ## Failure classification
 
-An isolation failure stays inside the classes the orchestrator already handles: a Docker
+An isolation failure stays inside the classes a caller already handles: a Docker
 OOM-kill or a fired pid-limit surfaces as a non-zero/timeout exit from the command —
-observed exactly like a hung local model (`LOCAL_UNAVAILABLE` / `FAILURE`). cordon
-invents **no new failure class**; that is deliberate (ADR-0040 §Consequences).
+the same shape as any other command failure or hang. cordon
+invents **no new failure class**; that is deliberate.
 
 ## Threat model (scope boundary)
 
@@ -47,7 +47,7 @@ Right-sized for **single-user, self-generated code against the user's own dispos
 — a runaway/buggy generation, not a hostile multi-tenant co-tenant. cordon provides **no**
 defense against genuinely hostile or third-party untrusted code; do not run such code
 through it. If the threat model shifts to "hostile tenant" or a hosted multi-user service,
-the microVM/gVisor question reopens on its merits (ADR-0040 §Revisit if).
+the microVM/gVisor question reopens on its merits.
 
 ## Swap-in (lead + adapter)
 

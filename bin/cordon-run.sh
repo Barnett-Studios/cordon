@@ -2,7 +2,7 @@
 # cordon — run one command inside a hardened, ephemeral, network-isolated container.
 #
 # The Sandbox component of the Barnett Studios agentic-harness toolkit. Transcribes
-# the ADR-0040 hardened-container recipe: a runaway or buggy self-generated process
+# the hardened-container recipe: a runaway or buggy self-generated process
 # is turned into a bounded, classified failure (OOM-kill / pid-limit / blocked
 # egress) instead of hanging or escaping the batch.
 #
@@ -14,7 +14,7 @@
 #   --network none · --read-only · --tmpfs /tmp · --cap-drop ALL
 #   --security-opt no-new-privileges · -u 1000:1000
 # Only the RESOURCE ceilings ("limits" in the contract) are tunable, via env, with
-# the ADR-0040 hardened defaults:
+# the hardened defaults:
 #   CORDON_MEMORY (default 2g) · CORDON_CPUS (default 2) · CORDON_PIDS (default 512)
 # --memory-swap is pinned equal to --memory so the memory ceiling is a HARD limit:
 # without it Docker grants swap up to 2x --memory, letting a runaway allocation

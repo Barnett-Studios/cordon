@@ -1,4 +1,4 @@
-"""Structural test for bin/cordon-run.sh — asserts the ADR-0040 hardened recipe's
+"""Structural test for bin/cordon-run.sh — asserts the hardened recipe's
 security flags are present verbatim and that the resource-ceiling env seam is wired
 without weakening any security flag. No Docker needed to run this test."""
 import pathlib
@@ -32,7 +32,7 @@ def test_script_has_shell_safety_header():
 def test_script_contains_every_security_flag():
     text = SCRIPT.read_text()
     for flag in REQUIRED_SECURITY_FLAGS:
-        assert flag in text, f"missing ADR-0040 security flag: {flag!r}"
+        assert flag in text, f"missing security flag: {flag!r}"
 
 
 def test_script_mounts_the_worktree_readwrite():
@@ -40,9 +40,9 @@ def test_script_mounts_the_worktree_readwrite():
     assert ":/work:rw" in text and "-w /work" in text
 
 
-def test_resource_ceilings_are_env_overridable_with_adr0040_defaults():
+def test_resource_ceilings_are_env_overridable_with_hardened_defaults():
     """The three resource ceilings are the contract's tunable `limits`: env-driven
-    with the ADR-0040 hardened defaults (2g / 2 cpus / 512 pids)."""
+    with the hardened defaults (2g / 2 cpus / 512 pids)."""
     text = SCRIPT.read_text()
     for var, default in [("CORDON_MEMORY", "2g"), ("CORDON_CPUS", "2"), ("CORDON_PIDS", "512")]:
         assert re.search(rf'{var}="\$\{{{var}:-{re.escape(default)}\}}"', text), (

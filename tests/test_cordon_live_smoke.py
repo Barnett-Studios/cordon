@@ -1,11 +1,11 @@
-"""Opt-in live-Docker smoke for bin/cordon-run.sh (ADR-0040).
+"""Opt-in live-Docker smoke for bin/cordon-run.sh.
 
 Needs a running Docker daemon plus the cordon runtime image
 (docker/runtime.Dockerfile — built locally as `cordon-runtime:smoke`, or a custom
 tag via CORDON_IMAGE). Skipped unless CORDON_LIVE_SMOKES=1; never part of the
 default gate.
 
-Proves two ADR-0040 boundary claims by observing container behavior, not by
+Proves two boundary claims by observing container behavior, not by
 re-reading the script's flags (test_cordon_run_script.py covers that statically):
 
   (a) --network none blocks an egress attempt deterministically — a plain non-zero
