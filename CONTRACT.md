@@ -13,7 +13,7 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
 
 - **worktree** — a host directory, mounted read-write at `/work` (the command's cwd).
   The intended input is a disposable per-node git work tree (one clean baseline commit),
-  the same volume shape the Proving Ground provisions.
+  the same volume shape a driving harness provisions.
 - **command** — the node's `accept` check (compile / test / grep). Its stdout+stderr are
   cordon's stdout+stderr; its exit code is cordon's exit code. No transform, no wrapper.
 - **limits** — the three resource ceilings, via env: `CORDON_MEMORY` (default `2g`),
