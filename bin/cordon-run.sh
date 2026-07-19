@@ -66,7 +66,7 @@ fi
 # when the timeout kills only the `docker run` client. $$/$RANDOM avoid collisions
 # across concurrent runs (a bare fixed name would clash).
 CONTAINER_NAME="cordon-run-$$-${RANDOM}"
-# shellcheck disable=SC2329  # invoked indirectly via the trap below
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via the trap below
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
