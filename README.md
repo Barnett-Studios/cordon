@@ -9,10 +9,11 @@ runaway or buggy process becomes a bounded, classified failure, not a hang or an
 
 cordon runs a single command (a build, a test, a grep — a code-generation loop's `accept`
 check) in a throwaway container with no network, dropped capabilities, a read-only root,
-and hard memory/cpu/pid ceilings. A fork bomb gets pid-killed; a runaway allocation gets
-OOM-killed; a phone-home fails deterministically under `--network none`. Every one is a
-plain non-zero exit the caller already knows how to classify — never an unbounded hang
-that takes the whole batch down with it.
+hard memory/cpu/pid ceilings, and a wall-clock deadline. A fork bomb gets pid-killed; a
+runaway allocation gets OOM-killed; a busy loop that trips none of those is killed at the
+`CORDON_TIMEOUT` deadline (exit `124`); a phone-home fails deterministically under
+`--network none`. Every one is a plain non-zero exit the caller already knows how to
+classify — never an unbounded hang that takes the whole batch down with it.
 
 It is a *right-sized* boundary for a **single-user** harness running code its **own**
 cascade generated against the user's **own** disposable repo — not a microVM built to
@@ -35,9 +36,15 @@ stdout/stderr and the exit code are the command's own. Tune the ceilings via env
 (defaults are the hardened values):
 
 ```sh
-CORDON_MEMORY=4g CORDON_CPUS=4 CORDON_PIDS=1024 \
+CORDON_MEMORY=4g CORDON_CPUS=4 CORDON_PIDS=1024 CORDON_TIMEOUT=600 \
   bin/cordon-run.sh /path/to/worktree cordon-runtime:local cargo test
 ```
+
+The wall-clock bound (`CORDON_TIMEOUT`, default `300`s; `CORDON_KILL_AFTER` grace default
+`10`s) is enforced with coreutils `timeout` — a deadline breach exits `124` and the
+container is reaped by a cleanup trap, so a busy loop can never hang the batch. `timeout`
+must be on `PATH` (macOS: `brew install coreutils` provides `gtimeout`, which cordon
+auto-detects).
 
 The security posture (`--network none`, `--cap-drop ALL`, read-only root, non-root uid, …)
 is **fixed** — only the resource ceilings tune. See [`CONTRACT.md`](CONTRACT.md).
