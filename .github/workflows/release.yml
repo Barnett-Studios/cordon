@@ -63,8 +63,10 @@ jobs:
         # binary from the sigstore/cosign GitHub release and verifies it against the
         # action's embedded release metadata — we trust that GitHub-hosted artifact and
         # the action's integrity check; no independent out-of-band checksum is pinned here.
+        # Must stay on cosign 2.x: 3.x dropped the detached cosign-linux-amd64.sig asset
+        # this installer verifies against, so a 3.x pin 404s the sig download (exit 22).
         with:
-          cosign-release: 'v3.1.2'
+          cosign-release: 'v2.6.4'
       - name: Sign image (keyless)
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
