@@ -12,7 +12,7 @@
 # No secrets, no `claude` CLI, no network-dependent behavior at container-run time
 # (cordon always runs with --network none); apt-get here runs only at image build
 # time, not at command-execution time.
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
