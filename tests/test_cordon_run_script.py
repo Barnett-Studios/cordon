@@ -64,3 +64,29 @@ def test_security_flags_are_not_env_parameterized():
     ).group(0)
     assert "--cap-drop ALL" in text
     assert re.search(r"-u \d+:\d+", text).group(0) == "-u 1000:1000"
+
+
+# ── RC-1 / cordon#2: .git is outside the sandbox's writable surface ─────────────
+
+def test_rc1_git_dir_is_mounted_read_only():
+    """The worktree stays rw (that is the contract), but `.git` must be shadowed by
+    a read-only bind so a sandboxed process cannot plant content the HOST later
+    executes. Docker orders bind mounts by path depth, so the deeper `/work/.git`
+    mount lands on top of `/work`."""
+    text = SCRIPT.read_text()
+    assert re.search(r'/\.git["\']?:/work/\.git:ro', text), (
+        "bin/cordon-run.sh must bind $WORKTREE/.git at /work/.git read-only"
+    )
+    # Still rw at the top level — read-only-everything would break the accept contract.
+    assert ":/work:rw" in text
+
+
+def test_rc1_git_mount_is_conditional_on_git_existing():
+    """`docker run -v` CREATES a missing bind source, so an unconditional mount would
+    materialize a spurious `.git/` in a non-repo worktree — turning a plain directory
+    into a broken repo and severing it from any enclosing repo. The mount must be
+    guarded by an existence test."""
+    text = SCRIPT.read_text()
+    assert re.search(r'if\s+\[\[\s+-[ed]\s+"\$WORKTREE/\.git"', text), (
+        "the .git mount must be conditional on $WORKTREE/.git existing"
+    )
