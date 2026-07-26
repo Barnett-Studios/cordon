@@ -135,6 +135,14 @@ def test_memory_ceiling_breach_is_a_bounded_kill_not_a_hang(tmp_path):
 #      sandbox. Every host git call runs with GIT_CONFIG_GLOBAL=/dev/null and the
 #      fixture sets core.hooksPath=.git/hooks explicitly.
 #   3. **The exec bit** — git silently skips a non-executable hook.
+#   4. **core.hooksPath must be RELATIVE.** A relative value resolves against the root
+#      of the working tree (githooks(5): git chdir's there before invoking a hook), so
+#      it names the same directory inside the container and on the host. An absolute
+#      container path like `/work/evilhooks` does NOT exist on the host, so host git
+#      finds no hook and the sentinel never appears — the escape assertion would pass
+#      against unfixed code. Measured on git 2.54.0: relative `evilhooks` FIRES on the
+#      host, `/work/evilhooks` does not. `test_rc1_relative_hookspath_is_a_live_host_
+#      vector` is the positive control that keeps this honest.
 #
 # The .git/config vector (a) is the one that actually fires in this framework's
 # deployment: rewriting .git/config overrides both the global hooksPath AND any
@@ -160,11 +168,20 @@ def _run_cordon(worktree, cmd):
 
 @pytest.fixture
 def bindable_worktree(tmp_path):
-    """A worktree the container can genuinely write, or a SKIP.
+    """A worktree the container can genuinely write **through cordon**, or a SKIP.
 
     Rooted under $HOME because Docker Desktop for macOS only bind-mounts shared
     paths; `tmp_path` is not one, and a non-shared source yields an empty root-owned
     directory in the VM instead of a mount. Yields the path; removes it afterwards.
+
+    The probe deliberately goes through `_run_cordon` — the real script — not a bare
+    `docker run`. Any reason cordon cannot execute the payload makes every escape
+    assertion below pass without the attack ever being attempted. A direct-docker
+    probe misses the most common one: `cordon-run.sh` hard-exits when coreutils
+    `timeout` is absent (it is not installed by default on macOS), so on such a host
+    the container never starts, nothing is ever written, and "the escape failed" is
+    a statement about nothing. Probing through the script covers that and any future
+    precondition it grows.
     """
     import tempfile
     base = pathlib.Path(tempfile.mkdtemp(prefix="cordon-rc1-", dir=pathlib.Path.home()))
@@ -172,16 +189,12 @@ def bindable_worktree(tmp_path):
     worktree.mkdir()
     os.chmod(base, 0o777)
     os.chmod(worktree, 0o777)
-    probe = subprocess.run(
-        ["docker", "run", "--rm", "-u", "1000:1000", "-v", f"{worktree}:/work:rw",
-         "-w", "/work", IMAGE, "sh", "-c", "touch /work/.probe"],
-        capture_output=True, text=True, timeout=120,
-    )
-    if probe.returncode != 0:
+    probe = _run_cordon(worktree, "touch /work/.probe")
+    if probe.returncode != 0 or not (worktree / ".probe").exists():
         shutil.rmtree(base, ignore_errors=True)
         pytest.skip(
-            "container cannot write the bind-mounted worktree "
-            f"(uid mapping / unshared path): {probe.stderr.strip()!r} — the escape "
+            "cordon cannot write the bind-mounted worktree (missing precondition, "
+            f"uid mapping, or unshared path): {probe.stderr.strip()!r} — the escape "
             "tests would be vacuous here, so they are skipped rather than passed"
         )
     (worktree / ".probe").unlink(missing_ok=True)
@@ -211,41 +224,55 @@ def _make_repo(worktree):
 
 def test_rc1_planted_git_config_does_not_execute_on_host(bindable_worktree):
     """(a) THE LIVE VECTOR — a container that can rewrite .git/config points
-    core.hooksPath at a directory it also controls."""
+    core.hooksPath at a directory it also controls.
+
+    Both the hooksPath and the hook's payload are **relative**, so they name the same
+    location inside the container and on the host. Using container-absolute paths
+    (`/work/...`) makes the sentinel assertion vacuous: the host cannot resolve them,
+    so nothing is ever written whether or not `.git` is sealed.
+    """
     worktree = _make_repo(bindable_worktree)
     sentinel = worktree / "PWNED_VIA_CONFIG"
     _run_cordon(worktree, (
         "mkdir -p /work/evilhooks && "
-        "printf '#!/bin/sh\\ntouch /work/PWNED_VIA_CONFIG\\n' > /work/evilhooks/post-checkout && "
+        "printf '#!/bin/sh\\ntouch PWNED_VIA_CONFIG\\n' > /work/evilhooks/post-checkout && "
         "chmod +x /work/evilhooks/post-checkout && "
-        "printf '[core]\\n\\thooksPath = /work/evilhooks\\n' >> /work/.git/config"
+        "printf '[core]\\n\\thooksPath = evilhooks\\n' >> /work/.git/config"
     ))
+    _host_git(worktree, "checkout", "-b", "other")
+    _host_git(worktree, "checkout", "-")
+
+    # The security property first: the failure that matters is execution, not config.
+    assert not sentinel.exists(), (
+        "SANDBOX ESCAPE: a hook planted inside the container executed on the host"
+    )
     assert "evilhooks" not in (worktree / ".git" / "config").read_text(), (
         ".git/config was rewritten from inside the sandbox — the container can "
         "redirect hook lookup to a directory it controls"
     )
-    _host_git(worktree, "checkout", "-b", "other")
-    _host_git(worktree, "checkout", "-")
-    assert not sentinel.exists(), (
-        "SANDBOX ESCAPE: a hook planted inside the container executed on the host"
-    )
 
 
 def test_rc1_planted_git_hook_does_not_execute_on_host(bindable_worktree):
-    """(b) The classic vector, kept honest by re-enabling .git/hooks in the fixture."""
+    """(b) The classic vector, kept honest by re-enabling .git/hooks in the fixture.
+
+    The payload is relative for the same reason as (a) — `touch /work/PWNED_VIA_HOOK`
+    cannot resolve on the host, which would make the execution assertion vacuous even
+    though the file-existence assertion above it still discriminates.
+    """
     worktree = _make_repo(bindable_worktree)
     sentinel = worktree / "PWNED_VIA_HOOK"
     _run_cordon(worktree, (
-        "printf '#!/bin/sh\\ntouch /work/PWNED_VIA_HOOK\\n' > /work/.git/hooks/post-checkout && "
+        "printf '#!/bin/sh\\ntouch PWNED_VIA_HOOK\\n' > /work/.git/hooks/post-checkout && "
         "chmod +x /work/.git/hooks/post-checkout"
     ))
-    assert not (worktree / ".git" / "hooks" / "post-checkout").exists(), (
-        ".git/hooks/post-checkout was written from inside the sandbox"
-    )
     _host_git(worktree, "checkout", "-b", "other")
     _host_git(worktree, "checkout", "-")
+
     assert not sentinel.exists(), (
         "SANDBOX ESCAPE: a hook planted inside the container executed on the host"
+    )
+    assert not (worktree / ".git" / "hooks" / "post-checkout").exists(), (
+        ".git/hooks/post-checkout was written from inside the sandbox"
     )
 
 
