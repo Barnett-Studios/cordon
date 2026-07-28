@@ -65,6 +65,29 @@ fi
 # Fixed, per-invocation container name so the cleanup trap can reap the container even
 # when the timeout kills only the `docker run` client. $$/$RANDOM avoid collisions
 # across concurrent runs (a bare fixed name would clash).
+# THE WORKTREE IS A TRUST BOUNDARY, AND .git IS OUTSIDE IT.
+# The worktree is mounted rw by contract — the command must be able to build and
+# write. But `.git` is not a data directory: it is a directory of things the HOST
+# later executes. A process in the sandbox that can write `.git/hooks/*`, or set
+# `core.hooksPath` / `core.fsmonitor` / a filter driver in `.git/config`, gets code
+# execution on the host at the next host-side git operation — outside every flag
+# above. Shadowing `.git` with a read-only bind closes that: Docker orders bind
+# mounts by path depth, so the deeper /work/.git mount lands on top of /work.
+#
+# Read-only rather than excluded, so an accept that *reads* git state still works;
+# only the write that causes the escape fails.
+#
+# CONDITIONAL, because `docker run -v` CREATES a missing bind source. Mounting
+# unconditionally would materialize a spurious `.git/` in a non-repo worktree —
+# turning a plain directory into a broken repo, severing it from any enclosing
+# repo, and (as root, on native Linux) leaving something the invoking user cannot
+# remove. The mitigation would manufacture the artifact it exists to prevent.
+# -e, not -d: a linked `git worktree` stores `.git` as a FILE.
+GIT_MOUNT=()
+if [[ -e "$WORKTREE/.git" ]]; then
+  GIT_MOUNT=(-v "$WORKTREE/.git":/work/.git:ro)
+fi
+
 CONTAINER_NAME="cordon-run-$$-${RANDOM}"
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via the trap below
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
@@ -87,6 +110,7 @@ rc=0
     --pids-limit "$CORDON_PIDS" \
     -u 1000:1000 \
     -v "$WORKTREE":/work:rw \
+    ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
     -w /work \
     "$RUNTIME_IMAGE" \
     "${ACCEPT_CMD[@]}" || rc=$?

@@ -64,3 +64,119 @@ def test_security_flags_are_not_env_parameterized():
     ).group(0)
     assert "--cap-drop ALL" in text
     assert re.search(r"-u \d+:\d+", text).group(0) == "-u 1000:1000"
+
+
+# ── RC-1 / cordon#2: .git is outside the sandbox's writable surface ─────────────
+
+def test_rc1_git_dir_is_mounted_read_only():
+    """The worktree stays rw (that is the contract), but `.git` must be shadowed by
+    a read-only bind so a sandboxed process cannot plant content the HOST later
+    executes. Docker orders bind mounts by path depth, so the deeper `/work/.git`
+    mount lands on top of `/work`."""
+    text = SCRIPT.read_text()
+    assert re.search(r'/\.git["\']?:/work/\.git:ro', text), (
+        "bin/cordon-run.sh must bind $WORKTREE/.git at /work/.git read-only"
+    )
+    # Still rw at the top level — read-only-everything would break the accept contract.
+    assert ":/work:rw" in text
+
+
+def test_rc1_git_mount_is_conditional_on_git_existing():
+    """`docker run -v` CREATES a missing bind source, so an unconditional mount would
+    materialize a spurious `.git/` in a non-repo worktree — turning a plain directory
+    into a broken repo and severing it from any enclosing repo. The mount must be
+    guarded by an existence test."""
+    text = SCRIPT.read_text()
+    assert re.search(r'if\s+\[\[\s+-[ed]\s+"\$WORKTREE/\.git"', text), (
+        "the .git mount must be conditional on $WORKTREE/.git existing"
+    )
+
+
+# ── positive control for the live escape smokes ──────────────────────────────────
+#
+# `test_cordon_live_smoke.py` proves the sandbox escape is blocked by asserting a
+# sentinel file does NOT appear. That is only evidence if the sentinel WOULD appear
+# when the plant succeeds. Two earlier revisions of those tests were vacuous for
+# exactly this reason — they used container-absolute paths (`core.hooksPath =
+# /work/evilhooks`, `touch /work/PWNED`) which the host cannot resolve, so nothing was
+# ever written whether or not `.git` was sealed.
+#
+# This lives here, in the always-run suite, rather than beside them: it needs no
+# Docker and no cordon, so it keeps guarding the assumption on every CI run, including
+# the ones where the live smokes skip.
+
+
+def _host_git(worktree, *args):
+    import os
+    import subprocess
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    return subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+
+def test_rc1_relative_hookspath_is_a_live_host_vector(tmp_path):
+    """A RELATIVE core.hooksPath + a RELATIVE hook payload really do execute on the
+    host, so the live smokes' `assert not sentinel.exists()` genuinely discriminates.
+
+    git resolves a relative `core.hooksPath` against the working-tree root and chdir's
+    there before invoking a hook (githooks(5)), which is why the relative form names
+    the same location inside the container and on the host.
+
+    If this ever fails, the live escape smokes have gone vacuous — fix them before
+    trusting a green run.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _host_git(worktree, "init", "-q")
+    _host_git(worktree, "config", "user.email", "t@example.com")
+    _host_git(worktree, "config", "user.name", "t")
+    (worktree / "seed.txt").write_text("seed\n")
+    _host_git(worktree, "add", "-A")
+    _host_git(worktree, "commit", "-q", "-m", "seed")
+
+    hooks = worktree / "evilhooks"
+    hooks.mkdir()
+    hook = hooks / "post-checkout"
+    hook.write_text("#!/bin/sh\ntouch PWNED_POSITIVE_CONTROL\n")
+    hook.chmod(0o755)
+    _host_git(worktree, "config", "core.hooksPath", "evilhooks")
+
+    _host_git(worktree, "checkout", "-b", "other")
+    _host_git(worktree, "checkout", "-")
+
+    assert (worktree / "PWNED_POSITIVE_CONTROL").exists(), (
+        "a relative core.hooksPath hook did NOT execute on this host, so the live "
+        "escape smokes cannot discriminate a blocked escape from an impossible one"
+    )
+
+
+def test_rc1_container_absolute_payload_would_be_vacuous(tmp_path):
+    """The counter-example, pinned so the regression cannot silently return.
+
+    With a container-absolute hooksPath the host finds no hook, so the sentinel never
+    appears — which is precisely why the original smokes passed against unfixed code.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _host_git(worktree, "init", "-q")
+    _host_git(worktree, "config", "user.email", "t@example.com")
+    _host_git(worktree, "config", "user.name", "t")
+    (worktree / "seed.txt").write_text("seed\n")
+    _host_git(worktree, "add", "-A")
+    _host_git(worktree, "commit", "-q", "-m", "seed")
+
+    hooks = worktree / "evilhooks"
+    hooks.mkdir()
+    hook = hooks / "post-checkout"
+    hook.write_text("#!/bin/sh\ntouch PWNED_ABS\n")
+    hook.chmod(0o755)
+    _host_git(worktree, "config", "core.hooksPath", "/work/evilhooks")
+
+    _host_git(worktree, "checkout", "-b", "other")
+    _host_git(worktree, "checkout", "-")
+
+    assert not (worktree / "PWNED_ABS").exists(), (
+        "unexpected: a container-absolute hooksPath resolved on the host"
+    )

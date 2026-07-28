@@ -11,7 +11,8 @@ or a batch-wide blast.
 cordon-run.sh <worktree-path> <runtime-image> <command...>
 ```
 
-- **worktree** — a host directory, mounted read-write at `/work` (the command's cwd).
+- **worktree** — a host directory, mounted read-write at `/work` (the command's cwd),
+  **except `.git`, which is mounted read-only** (see *The worktree is a trust boundary*).
   The intended input is a disposable per-node git work tree (one clean baseline commit),
   the same volume shape a driving harness provisions.
 - **command** — the node's `accept` check (compile / test / grep). Its stdout+stderr are
@@ -32,6 +33,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u 1000:1000` | every capability dropped, no escalation, non-root |
 | `--rm` (ephemeral, per command) | no state leaks between runs — matches the per-node ephemeral work tree it mounts |
+| `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above |
 
 Only the resource *ceilings* tune (the contract's `limits`); the isolation flags stay
 literal. `tests/test_cordon_run_script.py` enforces both halves statically.
@@ -46,6 +48,29 @@ deadline breach apart from an ordinary non-zero exit or a 137 OOM-kill. It is st
 "non-zero exit" class every caller already handles — just with a recognizable code —
 so cordon invents no genuinely new failure class; that is deliberate.
 
+## The worktree is a trust boundary
+
+The worktree is writable **by design** — the command has to build and test in it. That
+makes anything the container leaves behind *untrusted host input*, not a result.
+
+`.git` is the part of it the host executes, so it is mounted read-only whenever it exists
+(as a directory, or as a file for a linked `git worktree`). The mount is **conditional**:
+`docker run -v` creates a missing bind source, so mounting unconditionally would
+materialize a spurious `.git/` in a non-repo worktree — turning a plain directory into a
+broken repo and severing it from any enclosing one. For a worktree that is not a repo,
+cordon adds no mount and makes no claim.
+
+**What this does not cover.** Closing `.git` closes host execution *via git*. It does not
+close host execution via the writable worktree itself. If the host later runs a build or
+test tool in a cordon-touched worktree, a container can still plant `conftest.py` (pytest
+auto-imports it), `pyproject.toml` `[tool.pytest.ini_options] addopts`, `build.rs`
+(executed by `cargo test`), a `Makefile`, `package.json` `scripts`, or `.envrc`. Closing
+that class needs either a read-only worktree — which would break the accept contract — or
+a host-side `git reset --hard && git clean -fd` before any host tool touches the tree.
+**A caller that runs host tooling in a cordon-touched worktree must do that reset itself.**
+Within the threat model below — non-adversarial self-generated code — sealing the git path
+is proportionate; the residual is stated rather than implied away.
+
 ## Threat model (scope boundary)
 
 Right-sized for **single-user, self-generated code against the user's own disposable repo**
@@ -59,6 +84,7 @@ the microVM/gVisor question reopens on its merits.
 cordon is the **lead** reference impl. A stronger isolation backend — microsandbox, gVisor
 (runsc), E2B, Modal, Firecracker — drops into the same `run(worktree, cmd, limits) →
 {exit, out}` socket by replacing the `docker run` line, provided it preserves the fixed
-security posture above (or strengthens it). The contract is the CLI signature + the
+security posture above (or strengthens it) — **including the read-only `.git`**, which is
+part of that posture, not an implementation detail of the Docker backend. The contract is the CLI signature + the
 exit-code passthrough + the no-egress / bounded-resource guarantees; the isolation
 technology behind it is swappable.
