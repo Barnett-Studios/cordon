@@ -21,6 +21,23 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
   `CORDON_CPUS` (default `2`), `CORDON_PIDS` (default `512`), plus a wall-clock bound
   `CORDON_TIMEOUT` (default `300` seconds, with `CORDON_KILL_AFTER` grace default `10`).
 
+### The artifact that carries the guarantees is the script, not the image
+
+`<runtime-image>` is a **swappable argument**, not the security boundary.
+`ghcr.io/barnett-studios/cordon` is a generic `debian:bookworm-slim` + toolchain image
+with no isolation properties of its own — pulled and run directly, it provides none of
+the invariants below. Every one of them is applied by `cordon-run.sh` at `docker run`
+time.
+
+So **`cordon-run.sh` is the distributed artifact**: it ships as an asset on each GitHub
+Release with a SHA-256 checksum beside it, and it is published byte-for-byte as the file
+`tests/test_cordon_run_script.py` audits — an audit of a file consumers do not receive
+would guarantee nothing (cordon#4).
+
+It is deliberately not baked into the image as an entrypoint: the script *invokes*
+`docker run`, so running it inside the container it launches would require
+docker-in-docker.
+
 ## The security posture is fixed (the invariant)
 
 These flags are **not** parameterizable — they are the component's reason to exist:

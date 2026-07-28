@@ -71,3 +71,52 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  # cordon#4 — the runtime image is NOT the sandbox. It is the swappable `<runtime>`
+  # argument: a generic debian + toolchain image with no isolation properties of its own.
+  # Every guarantee cordon makes (`--network none`, `--cap-drop ALL`, `--read-only`,
+  # non-root uid, the pid/memory/cpu ceilings, the wall-clock reaper) lives in
+  # `bin/cordon-run.sh`, which shipped in no artifact at all — reachable only by cloning.
+  #
+  # The script cannot sensibly be baked into the image and run as its entrypoint: it is
+  # the thing that *invokes* `docker run`, so putting it inside the container it launches
+  # would require docker-in-docker. It ships as a release asset instead.
+  sandbox:
+    name: sandbox-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # attach the sandbox script to the GitHub Release
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Stage the sandbox artifact
+        # A verbatim copy, deliberately: `tests/test_cordon_run_script.py` audits
+        # `bin/cordon-run.sh`, and that audit only means something if the audited file is
+        # byte-for-byte the file consumers download. Nothing here templates or rewrites it.
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bin/cordon-run.sh dist/cordon-run.sh
+          chmod 0755 dist/cordon-run.sh
+          cd dist && sha256sum cordon-run.sh > cordon-run.sh.sha256
+          cat cordon-run.sh.sha256
+      - name: Publish to the GitHub Release
+        # `gh` is preinstalled on the runner and authenticates with GITHUB_TOKEN, so this
+        # adds no third-party action to the supply chain of the component whose entire
+        # job is containment.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease";; esac
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --generate-notes $prerelease
+          fi
+          gh release upload "$TAG" \
+            dist/cordon-run.sh \
+            dist/cordon-run.sh.sha256 \
+            --clobber
