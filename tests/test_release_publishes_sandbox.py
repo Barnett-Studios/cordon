@@ -60,6 +60,51 @@ def test_release_publishes_a_checksum_beside_the_script():
     assert "cordon-run.sh.sha256" in text, "the checksum must ship as its own asset"
 
 
+def test_the_script_is_signed_at_parity_with_the_image():
+    # The image in this same workflow is cosign-signed. A bare checksum on the script is
+    # corruption-detection, not provenance: it is uploaded by the same actor that could
+    # tamper with the artifact. The script is the MORE security-sensitive of the two — it is
+    # what runs untrusted code — so it must not ship with the weaker guarantee.
+    text = _release_yml()
+    assert "cosign sign-blob" in text, (
+        "the sandbox script must be cosign-signed, not merely checksummed"
+    )
+    for asset in ("cordon-run.sh.sig", "cordon-run.sh.pem"):
+        assert asset in text, f"{asset} must be uploaded alongside the script"
+
+
+def test_install_docs_do_not_pin_an_assetless_release():
+    # README told consumers to curl the script from v0.1.2, which carries no assets —
+    # publishing the script postdates that release, so the documented command 404s. Docs must
+    # not hardcode a version; the reader picks a release that actually has the asset.
+    readme = (ROOT / "README.md").read_text()
+    assert "releases/download/v$V" in readme, "the install snippet should stay version-agnostic"
+    assert "V=0.1.2" not in readme, (
+        "README pins v0.1.2, a release with zero assets — the documented curl 404s"
+    )
+    assert "carry no assets" in readme, (
+        "the gap between the docs and the first asset-bearing release must be stated, not implied"
+    )
+
+
+def test_docs_tell_consumers_to_verify_provenance():
+    readme = (ROOT / "README.md").read_text()
+    assert "cosign verify-blob" in readme, (
+        "shipping a signature the docs never tell anyone to check is theatre"
+    )
+
+
+def test_keyless_signing_has_the_oidc_scope_it_needs():
+    # cosign keyless signing mints its certificate from a GitHub OIDC token, which requires
+    # `id-token: write`. Without it the job fails only at tag time — after a release has
+    # already been cut — so assert it here rather than discovering it in production.
+    text = _release_yml()
+    assert text.count("id-token: write") >= 2, (
+        "both the image job and the sandbox job sign with cosign, so both need "
+        "`id-token: write`"
+    )
+
+
 def test_the_release_job_may_write_releases():
     # A `contents: write` scope somewhere in the file — without it the upload fails at
     # run time, which is a failure nobody sees until a tag is already pushed.

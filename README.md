@@ -51,14 +51,35 @@ is **fixed** — only the resource ceilings tune. See [`CONTRACT.md`](CONTRACT.m
 
 ## Install
 
-The sandbox is `bin/cordon-run.sh`. It ships as an asset on each
-[release](https://github.com/Barnett-Studios/cordon/releases), with a SHA-256 beside it:
+The sandbox is `bin/cordon-run.sh`.
+
+> **Releases up to and including `v0.1.2` carry no assets** — publishing the script is new, so
+> the first release cut *after* that change is the first one to have it. Until then, take the
+> script from a checkout of the tag you want. Check the
+> [releases page](https://github.com/Barnett-Studios/cordon/releases) for the assets before
+> using the commands below.
+
+Each release that has them ships `cordon-run.sh` plus a SHA-256, a cosign signature and its
+certificate:
 
 ```sh
-V=0.1.2
+V=<a release whose assets include cordon-run.sh>
 base="https://github.com/Barnett-Studios/cordon/releases/download/v$V"
-curl -fsSLO "$base/cordon-run.sh" -O "$base/cordon-run.sh.sha256"
+curl -fsSLO "$base/cordon-run.sh" \
+     -O "$base/cordon-run.sh.sha256" \
+     -O "$base/cordon-run.sh.sig" \
+     -O "$base/cordon-run.sh.pem"
+
 sha256sum -c cordon-run.sh.sha256      # macOS: shasum -a 256 -c
+
+# Provenance, not just integrity — the checksum is uploaded by whoever could also
+# tamper with the script, so verify the signature, not only the digest.
+cosign verify-blob cordon-run.sh \
+  --signature cordon-run.sh.sig \
+  --certificate cordon-run.sh.pem \
+  --certificate-identity-regexp '^https://github\.com/Barnett-Studios/cordon/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
 chmod +x cordon-run.sh
 ```
 

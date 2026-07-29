@@ -87,6 +87,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write   # attach the sandbox script to the GitHub Release
+      id-token: write   # cosign keyless signing via GitHub OIDC (same as the image job)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -102,6 +103,24 @@ jobs:
           chmod 0755 dist/cordon-run.sh
           cd dist && sha256sum cordon-run.sh > cordon-run.sh.sha256
           cat cordon-run.sh.sha256
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        # Same pin as the image job: cosign 2.x, because 3.x dropped the detached
+        # cosign-linux-amd64.sig asset this installer verifies against.
+        with:
+          cosign-release: 'v2.6.4'
+      - name: Sign the sandbox script (keyless)
+        # Parity with the image, which is cosign-signed in the job above. A bare sha256 is
+        # corruption-detection, not provenance: it is uploaded by the same actor that could
+        # tamper with the artifact. This is the MORE security-sensitive of the two — it is the
+        # thing that runs untrusted code — so it must not ship with the weaker guarantee.
+        run: |
+          set -euo pipefail
+          cd dist
+          COSIGN_EXPERIMENTAL=1 cosign sign-blob --yes \
+            --output-signature cordon-run.sh.sig \
+            --output-certificate cordon-run.sh.pem \
+            cordon-run.sh
       - name: Publish to the GitHub Release
         # `gh` is preinstalled on the runner and authenticates with GITHUB_TOKEN, so this
         # adds no third-party action to the supply chain of the component whose entire
@@ -119,4 +138,6 @@ jobs:
           gh release upload "$TAG" \
             dist/cordon-run.sh \
             dist/cordon-run.sh.sha256 \
+            dist/cordon-run.sh.sig \
+            dist/cordon-run.sh.pem \
             --clobber
