@@ -49,17 +49,65 @@ auto-detects).
 The security posture (`--network none`, `--cap-drop ALL`, read-only root, non-root uid, …)
 is **fixed** — only the resource ceilings tune. See [`CONTRACT.md`](CONTRACT.md).
 
-## Runtime image
+## Install
 
-`docker/runtime.Dockerfile` is a deliberately generic `git + python3 + build-essential`
-image. A language-specific variant is a tag swap, not a fork. Bring your own image — any
-image works, cordon only supplies the isolation flags at `docker run` time (including the
-non-root `-u 1000:1000`, so the image needs no baked-in user).
+The sandbox is `bin/cordon-run.sh`.
+
+> **Releases up to and including `v0.1.2` carry no assets** — publishing the script is new, so
+> the first release cut *after* that change is the first one to have it. Until then, take the
+> script from a checkout of the tag you want. Check the
+> [releases page](https://github.com/Barnett-Studios/cordon/releases) for the assets before
+> using the commands below.
+
+Each release that has them ships `cordon-run.sh` plus a SHA-256, a cosign signature and its
+certificate:
+
+```sh
+V=<a release whose assets include cordon-run.sh>
+base="https://github.com/Barnett-Studios/cordon/releases/download/v$V"
+curl -fsSLO "$base/cordon-run.sh" \
+     -O "$base/cordon-run.sh.sha256" \
+     -O "$base/cordon-run.sh.sig" \
+     -O "$base/cordon-run.sh.pem"
+
+sha256sum -c cordon-run.sh.sha256      # macOS: shasum -a 256 -c
+
+# Provenance, not just integrity — the checksum is uploaded by whoever could also
+# tamper with the script, so verify the signature, not only the digest.
+cosign verify-blob cordon-run.sh \
+  --signature cordon-run.sh.sig \
+  --certificate cordon-run.sh.pem \
+  --certificate-identity-regexp '^https://github\.com/Barnett-Studios/cordon/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+chmod +x cordon-run.sh
+```
+
+## Runtime image — *not* the sandbox
+
+`ghcr.io/barnett-studios/cordon` is the swappable `<runtime>` argument, **not** the
+security boundary. It is a deliberately generic `git + python3 + build-essential` image
+with no isolation properties of its own; pulling it and running it directly gives you
+none of cordon's guarantees.
+
+Every guarantee — `--network none`, `--cap-drop ALL`, read-only root, non-root uid, the
+pid/memory/cpu ceilings, the wall-clock reaper, the read-only `.git` mount — is supplied
+by `cordon-run.sh` at `docker run` time. That is why the script is the artifact to install
+and verify.
+
+The script is not baked into the image as an entrypoint: it is the thing that *invokes*
+`docker run`, so running it inside the container it launches would mean docker-in-docker.
+
+A language-specific variant is a tag swap, not a fork. Bring your own image — any image
+works (cordon supplies `-u 1000:1000` itself, so the image needs no baked-in user).
 
 ## Tests
 
 - `tests/test_cordon_run_script.py` — static: every security flag present, the resource
   seam wired, no security flag parameterized away. No Docker needed.
+- `tests/test_release_publishes_sandbox.py` — static: the release actually publishes the
+  audited script plus its checksum. A correct sandbox nobody receives is not a shipped
+  control.
 - `tests/test_cordon_live_smoke.py` — opt-in (`CORDON_LIVE_SMOKES=1`): observes a blocked
   egress and a bounded OOM-kill against a live daemon.
 

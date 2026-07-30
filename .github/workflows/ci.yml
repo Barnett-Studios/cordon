@@ -21,8 +21,15 @@ jobs:
         run: shellcheck bin/cordon-run.sh
       - name: install test deps
         run: python3 -m pip install --quiet pytest
-      - name: structural test (no Docker)
-        run: python3 -m pytest tests/test_cordon_run_script.py -q
+      - name: structural tests (no Docker)
+        # Named explicitly rather than `pytest tests/` so the Docker-dependent live smoke
+        # stays out of this step. A new structural test file must be added here, or it
+        # silently never runs in CI.
+        run: |
+          python3 -m pytest \
+            tests/test_cordon_run_script.py \
+            tests/test_release_publishes_sandbox.py \
+            -q
       - name: build runtime image
         run: docker build -f docker/runtime.Dockerfile -t cordon-runtime:ci .
       - name: live smoke (blocked egress + bounded OOM-kill)
