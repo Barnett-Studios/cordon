@@ -21,9 +21,15 @@ runaway allocation gets OOM-killed; a busy loop that trips neither is killed at 
 `--network none`. The caller already knows how to handle a non-zero exit. It has no answer for a
 process that never returns.
 
-The wider field converged on the same requirement — comparable agentic tools sandbox every write
-into a dedicated throwaway tree rather than letting generated code touch the working copy. cordon
-is that boundary as one auditable shell script, not a runtime you adopt.
+**What it does not bound is writes to your working tree.** That is mounted read-write, because
+modifying it is the command's entire job. cordon isolates the *process* — its network, its
+capabilities, its resource ceilings, its lifetime — not your working copy. Give it a tree you can
+throw away.
+
+The one carve-out is `.git`, shadowed by a read-only mount. A process that can write
+`.git/hooks/*`, or set `core.hooksPath` or a filter driver in `.git/config`, gets host code
+execution the next time *you* run git — an escape that happens outside the container, long after
+it exited, and that none of the boundaries above would ever see.
 
 **It is deliberately not a microVM.** It is right-sized for a **single-user** harness running code
 its **own** cascade generated against the user's **own** disposable repo. It is not built to
