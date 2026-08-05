@@ -31,6 +31,13 @@ The one carve-out is `.git`, shadowed by a read-only mount. A process that can w
 execution the next time *you* run git — an escape that happens outside the container, long after
 it exited, and that none of the boundaries above would ever see.
 
+**That closes host execution via git, and only via git.** The worktree is still writable, so a
+container can leave behind a `conftest.py`, a `build.rs`, a `Makefile`, a `package.json` script or
+an `.envrc` that runs the next time *you* run a build or test tool in that tree. Closing that class
+needs a host-side `git reset --hard && git clean -fd` before any host tooling touches it, and
+**cordon cannot do that for you** — it is your side of the boundary.
+[`CONTRACT.md`](CONTRACT.md) states the residual in full rather than implying it away.
+
 **It is deliberately not a microVM.** It is right-sized for a **single-user** harness running code
 its **own** cascade generated against the user's **own** disposable repo. It is not built to
 withstand a hostile co-tenant, and the threat model in [`CONTRACT.md`](CONTRACT.md) says so
