@@ -4,20 +4,37 @@
 [![Container](https://img.shields.io/badge/ghcr.io-cordon-blue?logo=docker)](https://github.com/Barnett-Studios/cordon/pkgs/container/cordon)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-**Run one command inside a hardened, ephemeral, network-isolated container — so a
-runaway or buggy process becomes a bounded, classified failure, not a hang or an escape.**
+**Executor: isolation · Stable** — feature-complete; maintenance only. The scope is finished,
+not abandoned. See the [component map](https://github.com/Barnett-Studios) for how this fits the rest.
+
+## Why this exists
+
+**The moment you dispatch work to a generated executor, you have to bound its writes and its
+lifetime — and the failure you actually get is a hang, not an escape.** A model-written build
+script that loops forever does not crash; it sits there holding the batch. A runaway allocation
+takes the host down with it. Neither produces an error your caller can classify, and a harness that
+cannot classify a failure cannot make progress past one.
+
+cordon converts every one of those into a plain non-zero exit. A fork bomb gets pid-killed; a
+runaway allocation gets OOM-killed; a busy loop that trips neither is killed at the
+`CORDON_TIMEOUT` deadline (exit `124`); a phone-home fails deterministically under
+`--network none`. The caller already knows how to handle a non-zero exit. It has no answer for a
+process that never returns.
+
+The wider field converged on the same requirement — comparable agentic tools sandbox every write
+into a dedicated throwaway tree rather than letting generated code touch the working copy. cordon
+is that boundary as one auditable shell script, not a runtime you adopt.
+
+**It is deliberately not a microVM.** It is right-sized for a **single-user** harness running code
+its **own** cascade generated against the user's **own** disposable repo. It is not built to
+withstand a hostile co-tenant, and the threat model in [`CONTRACT.md`](CONTRACT.md) says so
+explicitly rather than leaving you to infer the boundary.
+
+## What it does
 
 cordon runs a single command (a build, a test, a grep — a code-generation loop's `accept`
 check) in a throwaway container with no network, dropped capabilities, a read-only root,
-hard memory/cpu/pid ceilings, and a wall-clock deadline. A fork bomb gets pid-killed; a
-runaway allocation gets OOM-killed; a busy loop that trips none of those is killed at the
-`CORDON_TIMEOUT` deadline (exit `124`); a phone-home fails deterministically under
-`--network none`. Every one is a plain non-zero exit the caller already knows how to
-classify — never an unbounded hang that takes the whole batch down with it.
-
-It is a *right-sized* boundary for a **single-user** harness running code its **own**
-cascade generated against the user's **own** disposable repo — not a microVM built to
-defend against a hostile co-tenant (see [`CONTRACT.md`](CONTRACT.md) → threat model).
+hard memory/cpu/pid ceilings, and a wall-clock deadline.
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · abproof ·
 > cascadr · **cordon** · …
