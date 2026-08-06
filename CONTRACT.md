@@ -24,7 +24,8 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
 ```
 
 - **worktree** — a host directory, mounted read-write at `/work` (the command's cwd),
-  **except `.git`, which is mounted read-only** (see *The worktree is a trust boundary*).
+  **except its own top-level `.git`, which is mounted read-only** — a repository nested
+  inside the tree keeps a writable one (see *The worktree is a trust boundary*).
   The intended input is a disposable per-node git work tree (one clean baseline commit),
   the same volume shape a driving harness provisions.
 - **command** — the node's `accept` check (compile / test / grep). Its stdout+stderr are
@@ -62,7 +63,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u 1000:1000` | every capability dropped, no escalation, non-root |
 | `--rm` (ephemeral, per command) | no state leaks between runs — matches the per-node ephemeral work tree it mounts |
-| `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above |
+| the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. One path is mounted, so a *nested* repository keeps a writable `.git` — scoped below and in cordon#11 |
 
 Only the resource *ceilings* tune (the contract's `limits`); the isolation flags stay
 literal. `tests/test_cordon_run_script.py` enforces both halves statically.
@@ -89,8 +90,24 @@ materialize a spurious `.git/` in a non-repo worktree — turning a plain direct
 broken repo and severing it from any enclosing one. For a worktree that is not a repo,
 cordon adds no mount and makes no claim.
 
-**What this does not cover.** Closing `.git` closes host execution *via git*. It does not
-close host execution via the writable worktree itself. If the host later runs a build or
+**What this does not cover — 1: any other repository.** The mount is a single path,
+`<worktree>/.git`. Closing it closes host execution via git *for the repository cordon was
+handed*, and for no other. A vendored clone at `sub/` keeps a writable `sub/.git`, and a
+container that appends `[core] hooksPath` there gets host execution the next time the host runs
+git inside `sub/`. A **local** `core.hooksPath` outranks a global one, so a `~/.git-hooks`
+installed repo-wide — as dotclaude installs one — does not mitigate the config variant.
+Submodules are partly covered: the real gitdir at `<worktree>/.git/modules/<name>/` *is* under
+the read-only mount and rejects writes, while the `vendor/.git` pointer file in the tree is
+writable and can be repointed. No working execution has been demonstrated through the pointer
+file, and none is claimed. Widening the mount to every nested `.git` is the alternative and was
+not taken — it costs a full tree walk before every run and an unbounded mount count, against a
+path that only matters to someone deliberately looking for the nested repo, who already has the
+writable worktree named below. Tracked as cordon#11.
+`tests/test_cordon_live_smoke.py` pins both halves of this boundary so the mount cannot widen
+without this paragraph following it.
+
+**What this does not cover — 2: the worktree itself.** Closing `.git` does not
+close host execution via the writable worktree. If the host later runs a build or
 test tool in a cordon-touched worktree, a container can still plant `conftest.py` (pytest
 auto-imports it), `pyproject.toml` `[tool.pytest.ini_options] addopts`, `build.rs`
 (executed by `cargo test`), a `Makefile`, `package.json` `scripts`, or `.envrc`. Closing

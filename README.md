@@ -26,12 +26,27 @@ modifying it is the command's entire job. cordon isolates the *process* — its 
 capabilities, its resource ceilings, its lifetime — not your working copy. Give it a tree you can
 throw away.
 
-The one carve-out is `.git`, shadowed by a read-only mount. A process that can write
-`.git/hooks/*`, or set `core.hooksPath` or a filter driver in `.git/config`, gets host code
+The one carve-out is the worktree's own `.git`, shadowed by a read-only mount. A process that can
+write `.git/hooks/*`, or set `core.hooksPath` or a filter driver in `.git/config`, gets host code
 execution the next time *you* run git — an escape that happens outside the container, long after
 it exited, and that none of the boundaries above would ever see.
 
-**That closes host execution via git, and only via git.** The worktree is still writable, so a
+**That closes host execution via git for the repository cordon was handed — that one, and no
+other.** The mount is a single path, `<worktree>/.git`. A repository *nested* inside the tree — a
+vendored clone at `sub/` with its own `.git` — keeps a fully writable one, and a container that
+appends `[core] hooksPath` to `sub/.git/config` gets host execution the next time you run git in
+`sub/`. A local `core.hooksPath` outranks a global one, so the `~/.git-hooks` that dotclaude
+installs in every repo does not cover this. Submodules land in between: the real gitdir lives at
+`<worktree>/.git/modules/<name>/` and *is* under the read-only mount, but the `vendor/.git`
+pointer file in the tree is writable and can be repointed — no working execution has been
+demonstrated through that, and none is claimed either way.
+
+Widening the mount to every nested `.git` would close it and is deliberately not done: it costs a
+full tree walk before every run and an unbounded mount count, to shut a path that only matters
+against someone *looking* for the nested repo — and that someone already has the writable worktree
+below, which is cheaper. Tracked as [#11](https://github.com/Barnett-Studios/cordon/issues/11).
+
+The worktree is still writable, so a
 container can leave behind a `conftest.py`, a `build.rs`, a `Makefile`, a `package.json` script or
 an `.envrc` that runs the next time *you* run a build or test tool in that tree. Closing that class
 needs a host-side `git reset --hard && git clean -fd` before any host tooling touches it, and
@@ -138,8 +153,11 @@ works (cordon supplies `-u 1000:1000` itself, so the image needs no baked-in use
 - `tests/test_release_publishes_sandbox.py` — static: the release actually publishes the
   audited script plus its checksum. A correct sandbox nobody receives is not a shipped
   control.
-- `tests/test_cordon_live_smoke.py` — opt-in (`CORDON_LIVE_SMOKES=1`): observes a blocked
-  egress and a bounded OOM-kill against a live daemon.
+- `tests/test_cordon_live_smoke.py` — opt-in (`CORDON_LIVE_SMOKES=1`): against a live
+  daemon, observes a blocked egress, a bounded OOM-kill, and that a hook or a
+  `core.hooksPath` planted inside the container does **not** execute on the host. One
+  test pins the *limit* of that — a nested repository's `.git` stays writable — so the
+  mount cannot widen without the docs above following it.
 
 ## License
 
