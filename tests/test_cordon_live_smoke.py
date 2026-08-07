@@ -276,6 +276,66 @@ def test_rc1_planted_git_hook_does_not_execute_on_host(bindable_worktree):
     )
 
 
+def _make_nested_repo(worktree):
+    """A second, independent repository inside the worktree — a vendored clone, the
+    shape `measurement/corpus` has in the consuming assembly."""
+    nested = worktree / "sub"
+    nested.mkdir()
+    _make_repo(nested)
+    for p in [nested, *nested.rglob("*")]:
+        try:
+            os.chmod(p, 0o777)
+        except OSError:
+            pass
+    return nested
+
+
+def test_rc1_nested_repo_keeps_a_writable_git_and_the_docs_say_so(bindable_worktree):
+    """cordon#11 — the mount is ONE path, so the seal covers the repository cordon was
+    handed and no other. This pins the boundary where the code actually draws it.
+
+    It asserts **both halves in one run**, which is what keeps it honest:
+
+      * the outer `.git/config` write must FAIL. Without that half the test passes on a
+        host where the container could not write anything at all — the vacuity trap the
+        header above names, in its most expensive form, because `bindable_worktree`'s
+        probe only proves the *worktree* is writable, not that the mount landed.
+      * the nested `sub/.git/config` write must SUCCEED. That is the documented gap. If
+        someone widens the mount (cordon#11, option 1), this half reddens and sends them
+        to the paragraph in CONTRACT.md that has to change with it.
+
+    Nothing is executed on the host here. A planted `core.hooksPath` in a nested repo
+    firing on the host was demonstrated during review of #10 and is recorded in cordon#11;
+    re-landing host execution inside the suite buys nothing the write assertion does not
+    already give, and leaves a live payload in a test.
+    """
+    worktree = _make_repo(bindable_worktree)
+    nested = _make_nested_repo(worktree)
+
+    result = _run_cordon(worktree, (
+        "{ printf '[core]\\n\\thooksPath = outerhooks\\n' >> /work/.git/config && "
+        "echo OUTER_WRITABLE; } || echo OUTER_SEALED; "
+        "{ printf '[core]\\n\\thooksPath = nestedhooks\\n' >> /work/sub/.git/config && "
+        "echo NESTED_WRITABLE; } || echo NESTED_SEALED"
+    ))
+    out = result.stdout
+
+    assert "OUTER_SEALED" in out, (
+        "the read-only .git mount did not take, so the second half of this test proves "
+        f"nothing about a nested repo: stdout={out!r} stderr={result.stderr!r}"
+    )
+    # `outerhooks`, not `hooksPath` — _make_repo sets a legitimate core.hooksPath, so the
+    # bare key is present in a clean config and asserting on it fails a working sandbox.
+    assert "outerhooks" not in (worktree / ".git" / "config").read_text()
+
+    assert "NESTED_WRITABLE" in out and "nestedhooks" in (nested / ".git" / "config").read_text(), (
+        "a nested repository's .git is now sealed. That is an IMPROVEMENT, not a "
+        "failure — but README.md and CONTRACT.md both state that it is not, and "
+        "cordon#11 is open on the trade. Update them in the same change and delete "
+        f"this assertion: stdout={out!r}"
+    )
+
+
 def test_rc1_worktree_stays_writable(bindable_worktree):
     """Regression guard on the fix: only `.git` is sealed. A read-only worktree would
     break the accept contract — which is why exclusion lost to a read-only overlay."""
