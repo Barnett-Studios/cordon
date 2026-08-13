@@ -2,7 +2,7 @@
 
 `docker/runtime.Dockerfile` is `debian:bookworm-slim` plus a toolchain. The isolation
 lives entirely in `bin/cordon-run.sh` — `--network none`, `--cap-drop ALL`, `--read-only`,
-`-u 1000:1000`, the pid/memory/cpu ceilings, the wall-clock reaper. The release workflow
+`-u $(id -u):$(id -g)`, the pid/memory/cpu ceilings, the wall-clock reaper. The release workflow
 built and signed only the image, so `docker pull ghcr.io/barnett-studios/cordon` handed a
 consumer a generic toolchain image with **zero** isolation properties, and the sandbox
 itself was reachable only by cloning the repo.

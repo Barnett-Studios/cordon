@@ -64,11 +64,13 @@ def _require_docker_and_image():
 
 
 def _sandboxed_worktree(tmp_path):
-    # cordon-run.sh runs the container as -u 1000:1000; make the mounted worktree
-    # world-accessible so that uid works regardless of the host uid.
+    # Deliberately 0o700 — the permissions a real checkout has, and the case the old
+    # fixed `-u 1000:1000` could not read on any host whose uid is not 1000. The 0o777
+    # this used to do was the workaround for cordon#3 living in the test suite; leaving it
+    # in would have meant the fix could regress with every smoke still green.
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    os.chmod(worktree, 0o777)
+    os.chmod(worktree, 0o700)
     return worktree
 
 

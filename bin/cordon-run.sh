@@ -12,7 +12,7 @@
 #
 # The SECURITY posture is fixed and non-negotiable (that is the whole point):
 #   --network none · --read-only · --tmpfs /tmp · --cap-drop ALL
-#   --security-opt no-new-privileges · -u 1000:1000
+#   --security-opt no-new-privileges · -u <invoking uid>:<invoking gid>, never root
 # Only the RESOURCE ceilings ("limits" in the contract) are tunable, via env, with
 # the hardened defaults:
 #   CORDON_MEMORY (default 2g) · CORDON_CPUS (default 2) · CORDON_PIDS (default 512)
@@ -93,6 +93,26 @@ CONTAINER_NAME="cordon-run-$$-${RANDOM}"
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
+# The container user must MATCH the bind-mounted worktree's owner, not a fixed number.
+# `-u 1000:1000` worked only because Docker Desktop for macOS virtualizes bind-mount
+# ownership; on Linux — the roadmap platform, and every VPS — uid 1000 reading a worktree
+# owned by uid 501 or 1001 gets permission denied, and the accept command fails for a
+# reason that has nothing to do with the code under test (cordon#3). The same mismatch also
+# makes `git` inside the sandbox refuse the worktree as "dubious ownership".
+#
+# This is NOT an env seam: the value comes from `id`, so an operator cannot weaken the
+# posture by exporting something. The posture it must preserve is *non-root*, and matching
+# the mount cannot deliver that when the invoker IS root — so that case is refused rather
+# than silently run as uid 0 with the mount readable and the posture gone.
+CONTAINER_UID=$(id -u)
+CONTAINER_GID=$(id -g)
+if [[ "$CONTAINER_UID" -eq 0 ]]; then
+  echo "cordon: refusing to run as root — the container user matches the invoking user," >&2
+  echo "cordon: and uid 0 inside the sandbox is not a posture cordon will take. Invoke as" >&2
+  echo "cordon: a non-root user that owns $WORKTREE." >&2
+  exit 1
+fi
+
 start=$(date +%s)
 rc=0
 "$TIMEOUT_BIN" --signal=TERM --kill-after="$CORDON_KILL_AFTER" "$CORDON_TIMEOUT" \
@@ -108,7 +128,7 @@ rc=0
     --memory-swap "$CORDON_MEMORY" \
     --cpus "$CORDON_CPUS" \
     --pids-limit "$CORDON_PIDS" \
-    -u 1000:1000 \
+    -u "$CONTAINER_UID:$CONTAINER_GID" \
     -v "$WORKTREE":/work:rw \
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
     -w /work \

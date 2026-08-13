@@ -144,7 +144,7 @@ The script is not baked into the image as an entrypoint: it is the thing that *i
 `docker run`, so running it inside the container it launches would mean docker-in-docker.
 
 A language-specific variant is a tag swap, not a fork. Bring your own image — any image
-works (cordon supplies `-u 1000:1000` itself, so the image needs no baked-in user).
+works (cordon supplies `-u $(id -u):$(id -g)` itself, so the image needs no baked-in user).
 
 ## Tests
 
