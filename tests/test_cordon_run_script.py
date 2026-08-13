@@ -13,7 +13,7 @@ REQUIRED_SECURITY_FLAGS = [
     "--tmpfs /tmp",
     "--cap-drop ALL",
     "--security-opt no-new-privileges",
-    "-u 1000:1000",
+    '-u "$CONTAINER_UID:$CONTAINER_GID"',
     "docker run",
     "--rm",
 ]
@@ -63,7 +63,30 @@ def test_security_flags_are_not_env_parameterized():
         r"--network \S+", text
     ).group(0)
     assert "--cap-drop ALL" in text
-    assert re.search(r"-u \d+:\d+", text).group(0) == "-u 1000:1000"
+    # The uid is derived, not fixed — but derived from `id`, never from the environment.
+    # A fixed 1000 only worked because Docker Desktop for macOS virtualizes bind-mount
+    # ownership; on Linux it is a permission-denied accept failure (cordon#3). What the
+    # guard still has to hold is that an OPERATOR cannot choose the uid: `${CORDON_UID}`
+    # here would be the regression, and `$(id -u)` is not.
+    assert "CONTAINER_UID=$(id -u)" in text
+    assert "CONTAINER_GID=$(id -g)" in text
+    assert not re.search(r"CONTAINER_UID=\$\{?[A-Z_]*CORDON", text), (
+        "the container uid must not be operator-settable"
+    )
+    # The flag as it appears in the `docker run` invocation, not in the header comment —
+    # matching the first `-u ...` in the file found the prose and passed on it.
+    assert '\n    -u "$CONTAINER_UID:$CONTAINER_GID" \\\n' in text
+    assert not re.search(r"^\s*-u \d+:\d+", text, re.M), "no fixed uid may survive"
+
+
+def test_root_is_refused_rather_than_run_as_uid_0():
+    """Matching the mount and staying non-root are the same requirement everywhere
+    except when the invoker IS root, where they conflict. cordon refuses: uid 0 inside
+    the sandbox would drop a posture the header calls non-negotiable, and doing it
+    silently is worse than failing."""
+    text = SCRIPT.read_text()
+    assert 'if [[ "$CONTAINER_UID" -eq 0 ]]; then' in text
+    assert "refusing to run as root" in text
 
 
 # ── RC-1 / cordon#2: .git is outside the sandbox's writable surface ─────────────
