@@ -83,10 +83,98 @@ def test_root_is_refused_rather_than_run_as_uid_0():
     """Matching the mount and staying non-root are the same requirement everywhere
     except when the invoker IS root, where they conflict. cordon refuses: uid 0 inside
     the sandbox would drop a posture the header calls non-negotiable, and doing it
-    silently is worse than failing."""
+    silently is worse than failing.
+
+    Text-level companion to `test_root_refusal_happens_before_docker_runs`, which is the
+    one with teeth. Kept for the message it gives on a rename, not as the guard."""
     text = SCRIPT.read_text()
     assert 'if [[ "$CONTAINER_UID" -eq 0 ]]; then' in text
     assert "refusing to run as root" in text
+
+
+# ── The refusal is behaviour, not a string ─────────────────────────────────────
+#
+# The two assertions above only require those characters to exist SOMEWHERE. The
+# property is that the refusal happens BEFORE `docker run`, and nothing above tests
+# position: moving the block verbatim to the end of the script leaves both satisfied,
+# and the sandbox then runs as root with a writable bind mount. Measured — 21 passed
+# with the mutant in place, and the resulting invocation carried `-u 0:0`.
+#
+# That is the same shape as the `-u \d+:\d+` guard fixed in this same change: an
+# assertion matching text rather than behaviour, satisfied by a file that does the
+# wrong thing.
+#
+# Root is the one case that exits before `docker run`, so it needs no Docker to test —
+# only stubs first on PATH. This file is already named in CI's structural step, so
+# these run there without a workflow change.
+
+_STUBS = {
+    # Records the argv it was handed, so the assertion is on what the container would
+    # actually get rather than on the source text that computes it.
+    "docker": '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$CORDON_TEST_LOG"\nexit 0\n',
+    # The script requires coreutils `timeout` and refuses without it; it execs the rest
+    # of its argv, so `timeout N docker run …` reaches the docker stub.
+    "timeout": '#!/bin/sh\nshift 3\nexec "$@"\n',
+}
+
+
+def _run_with_uid(tmp_path, uid):
+    """Invoke the real script with `id` stubbed to `uid`. Returns (rc, docker_argv)."""
+    import os
+    import subprocess
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "docker.log"
+    for name, body in _STUBS.items():
+        f = bindir / name
+        f.write_text(body)
+        f.chmod(0o755)
+    idstub = bindir / "id"
+    idstub.write_text(f'#!/bin/sh\nprintf \'%s\\n\' {uid}\n')
+    idstub.chmod(0o755)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["CORDON_TEST_LOG"] = str(log)
+    proc = subprocess.run(
+        [str(SCRIPT), str(work), "img:latest", "true"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    argv = log.read_text().splitlines() if log.exists() else []
+    return proc.returncode, argv
+
+
+def test_root_refusal_happens_before_docker_runs(tmp_path):
+    rc, argv = _run_with_uid(tmp_path, 0)
+    assert rc == 1, "an invocation as root must fail, not proceed"
+    # `docker run`, not `docker` — the cleanup trap fires on every exit path and calls
+    # `docker rm -f` on a container that was never created. Asserting docker was never
+    # invoked AT ALL fails on that legitimate cleanup, which would make this guard a
+    # nuisance rather than a control, and the first thing anyone deleted.
+    assert "run" not in argv, (
+        "docker run was reached as root — the container would run as uid 0 with a "
+        f"writable bind mount, the exact posture the refusal exists to prevent; argv={argv}"
+    )
+
+
+def test_a_non_root_invocation_still_runs_with_the_invoking_uid(tmp_path):
+    """The control. Without it a script that refused EVERYTHING passes the test above
+    while the sandbox never runs at all — and it pins the uid on the argv the container
+    receives, not in the source text that computes it."""
+    rc, argv = _run_with_uid(tmp_path, 4242)
+    assert rc == 0, f"a non-root invocation must proceed; argv={argv}"
+    assert "run" in argv, f"docker run was never reached; argv={argv}"
+    assert "4242:4242" in argv, (
+        f"the derived uid must reach the container as -u; argv={argv}"
+    )
+    assert argv[argv.index("4242:4242") - 1] == "-u", (
+        f"the uid must be the argument to -u, not incidental text; argv={argv}"
+    )
 
 
 # ── RC-1 / cordon#2: .git is outside the sandbox's writable surface ─────────────
