@@ -16,7 +16,32 @@ REQUIRED_SECURITY_FLAGS = [
     '-u "$CONTAINER_UID:$CONTAINER_GID"',
     "docker run",
     "--rm",
+    # Pinned equal to --memory so the ceiling is HARD: without it Docker grants swap up
+    # to 2x --memory and a runaway allocation escapes the limit instead of being
+    # OOM-killed. The script header called this load-bearing; nothing enforced it, and
+    # deleting the line left the suite at 13 passed (cordon#13).
+    '--memory-swap "$CORDON_MEMORY"',
 ]
+
+# Every `-flag` the `docker run` invocation may carry, classified. This list is the
+# audit's denominator, and it used to be whatever someone had noticed — so the rows of
+# CONTRACT.md's posture table that nobody transcribed were unguarded, and a NEW flag
+# arrived unguarded by default. `test_every_docker_flag_is_classified` inverts that: an
+# unclassified flag is a failure, so widening the invocation forces a decision here.
+FIXED_POSTURE_DOCKER_FLAGS = {
+    "--name",        # so the cleanup trap can reap a container the timeout orphaned
+    "--rm",
+    "--network",
+    "--read-only",
+    "--tmpfs",
+    "--cap-drop",
+    "--security-opt",
+    "--memory-swap",  # not a ceiling: it exists to stop the ceiling being soft
+    "-u",
+    "-v",
+    "-w",
+}
+TUNABLE_CEILING_DOCKER_FLAGS = {"--memory", "--cpus", "--pids-limit"}
 
 
 def test_script_exists_and_is_executable():
@@ -33,6 +58,42 @@ def test_script_contains_every_security_flag():
     text = SCRIPT.read_text()
     for flag in REQUIRED_SECURITY_FLAGS:
         assert flag in text, f"missing security flag: {flag!r}"
+
+
+def _docker_run_block():
+    """The text of the `docker run …` invocation, up to the accept command."""
+    text = SCRIPT.read_text()
+    end = text.index('"${ACCEPT_CMD[@]}"')
+    # rindex, not index: the header comment mentions `docker run` too, and starting there
+    # would sweep the timeout wrapper's own options in as if they were docker flags.
+    start = text.rindex("docker run", 0, end)
+    return text[start:end]
+
+
+def test_every_docker_flag_is_classified():
+    """No unclassified flag may reach `docker run`.
+
+    The audit's coverage claim ("enforces both halves") was only ever true of the flags
+    someone had listed — a denominator taken from the observations. This takes it from
+    the invocation itself, so a flag that arrives without a decision here fails rather
+    than passing silently.
+
+    `${GIT_MOUNT[@]…}` expands to `-v <path>:ro` at runtime and is not a literal token;
+    it has its own tests (`test_rc1_git_dir_is_mounted_read_only`,
+    `test_rc1_git_mount_is_conditional_on_git_existing`).
+    """
+    known = FIXED_POSTURE_DOCKER_FLAGS | TUNABLE_CEILING_DOCKER_FLAGS
+    flags = {tok for tok in _docker_run_block().split() if tok.startswith("-")}
+    unclassified = flags - known
+    assert not unclassified, (
+        f"unclassified docker flags: {sorted(unclassified)} — add each to "
+        "FIXED_POSTURE_DOCKER_FLAGS or TUNABLE_CEILING_DOCKER_FLAGS, and to "
+        "CONTRACT.md's posture table if it is part of the guarantee"
+    )
+    # The control: the classification is only meaningful if the flags are really there.
+    # An invocation stripped to `docker run img cmd` would satisfy the assertion above.
+    missing = FIXED_POSTURE_DOCKER_FLAGS - flags
+    assert not missing, f"fixed-posture flags absent from the invocation: {sorted(missing)}"
 
 
 def test_script_mounts_the_worktree_readwrite():
@@ -174,6 +235,149 @@ def test_a_non_root_invocation_still_runs_with_the_invoking_uid(tmp_path):
     )
     assert argv[argv.index("4242:4242") - 1] == "-u", (
         f"the uid must be the argument to -u, not incidental text; argv={argv}"
+    )
+
+
+# ── The wall-clock bound (cordon#13) ────────────────────────────────────────────
+#
+# This is the half of the posture table nothing tested. Deleting the entire `timeout`
+# wrapper, or the 124 classification, each left the suite at 13 passed — while the
+# script's own header calls the wrapper "what makes 'never an unbounded hang' true"
+# and the CONTRACT reserves 124 as the one signal that distinguishes a deadline breach
+# from a 137 OOM-kill.
+#
+# Behavioural, not textual: the stubs record what the script actually invoked and what
+# it actually exited with. A text assertion here would be satisfied by a script that
+# carries the right characters in the wrong order — the failure mode already recorded
+# above for the root refusal.
+
+
+def _run_stubbed(tmp_path, timeout_body, env_extra=None, uid=4242):
+    """Invoke the real script with `id`, `docker` and `timeout` stubbed.
+
+    Returns (rc, docker_argv, timeout_argv). `timeout_body` decides what the wrapper
+    does, which is how a deadline breach is simulated without waiting for one.
+    """
+    import os
+    import subprocess
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    dlog = tmp_path / "docker.log"
+    tlog = tmp_path / "timeout.log"
+
+    (bindir / "docker").write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$CORDON_TEST_LOG"\nexit 0\n'
+    )
+    (bindir / "timeout").write_text(timeout_body)
+    (bindir / "id").write_text(f'#!/bin/sh\nprintf \'%s\\n\' {uid}\n')
+    for name in ("docker", "timeout", "id"):
+        (bindir / name).chmod(0o755)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["CORDON_TEST_LOG"] = str(dlog)
+    env["CORDON_TIMEOUT_TEST_LOG"] = str(tlog)
+    env.update(env_extra or {})
+    proc = subprocess.run(
+        [str(SCRIPT), str(work), "img:latest", "true"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    return (
+        proc.returncode,
+        dlog.read_text().splitlines() if dlog.exists() else [],
+        tlog.read_text().splitlines() if tlog.exists() else [],
+    )
+
+
+# Records its own argv, then behaves like coreutils `timeout`: drop the three leading
+# options and exec the wrapped command.
+_TIMEOUT_PASSTHROUGH = (
+    '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$CORDON_TIMEOUT_TEST_LOG"\nshift 3\nexec "$@"\n'
+)
+
+
+def test_docker_run_is_wrapped_in_the_wall_clock_timeout(tmp_path):
+    """`docker run` must be the timeout's child, with both ceilings passed to it.
+
+    Red on deleting the wrapper: `timeout` is then never invoked at all, so its log is
+    empty and the container has no deadline.
+    """
+    rc, docker_argv, timeout_argv = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
+    assert rc == 0, f"the control run must succeed; docker_argv={docker_argv}"
+    assert timeout_argv, (
+        "coreutils `timeout` was never invoked — the run is unbounded, and a busy loop "
+        "that never trips the memory or pid ceiling would spin forever"
+    )
+    assert timeout_argv[0] == "--signal=TERM", f"timeout argv={timeout_argv}"
+    assert timeout_argv[1] == "--kill-after=10", (
+        f"CORDON_KILL_AFTER must default to 10s of grace; timeout argv={timeout_argv}"
+    )
+    assert timeout_argv[2] == "300", (
+        f"CORDON_TIMEOUT must default to 300s; timeout argv={timeout_argv}"
+    )
+    assert timeout_argv[3:5] == ["docker", "run"], (
+        f"docker run must be the wrapped command, not a sibling; argv={timeout_argv}"
+    )
+
+
+def test_the_wall_clock_ceilings_are_env_overridable(tmp_path):
+    """The control on the two assertions above: they must be reading the vars, not two
+    numbers that happen to be 10 and 300."""
+    _, _, timeout_argv = _run_stubbed(
+        tmp_path, _TIMEOUT_PASSTHROUGH,
+        {"CORDON_TIMEOUT": "42", "CORDON_KILL_AFTER": "7"},
+    )
+    assert timeout_argv[1] == "--kill-after=7", f"timeout argv={timeout_argv}"
+    assert timeout_argv[2] == "42", f"timeout argv={timeout_argv}"
+
+
+def test_a_deadline_breach_exits_124(tmp_path):
+    """coreutils returns 124 when the deadline is reached and the process dies on TERM."""
+    rc, _, _ = _run_stubbed(tmp_path, '#!/bin/sh\nexit 124\n')
+    assert rc == 124, f"a timeout must surface as the reserved 124; got {rc}"
+
+
+def test_a_kill_escalated_deadline_breach_is_124_not_137(tmp_path):
+    """The discriminating case. `timeout` escalates to KILL after the grace period and
+    the run comes back as 137 — the same code Docker returns for an OOM-kill. cordon
+    must translate that to 124 when the run lasted the full window.
+
+    This is the one that is red on `exit "$rc"` in place of `exit
+    "$CORDON_EXIT_TIMEOUT"`: for the plain-124 case above the mutant returns 124 too.
+    """
+    rc, _, _ = _run_stubbed(
+        tmp_path, '#!/bin/sh\nsleep 2\nexit 137\n', {"CORDON_TIMEOUT": "1"}
+    )
+    assert rc == 124, (
+        f"a KILL-escalated deadline breach must still be reported as 124, not {rc} — "
+        "a caller cannot otherwise tell it from an OOM-kill"
+    )
+
+
+def test_an_early_137_is_not_reported_as_a_timeout(tmp_path):
+    """The other side of it: an OOM-kill fires well before the deadline and must keep
+    its own code. Without this, `exit 124` unconditionally on 137 would pass the test
+    above while erasing the distinction it exists to make."""
+    rc, _, _ = _run_stubbed(
+        tmp_path, '#!/bin/sh\nexit 137\n', {"CORDON_TIMEOUT": "300"}
+    )
+    assert rc == 137, f"a 137 inside the window is an OOM-kill, not a timeout; got {rc}"
+
+
+def test_the_cleanup_trap_reaps_the_named_container(tmp_path):
+    """Killing the `docker run` client leaves the daemon-owned container running, so the
+    deadline is only real if the container is reaped by name."""
+    _, docker_argv, _ = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
+    assert "rm" in docker_argv and "-f" in docker_argv, (
+        f"the cleanup trap must docker rm -f the container; argv={docker_argv}"
+    )
+    named = [a for a in docker_argv if a.startswith("cordon-run-")]
+    assert named, f"the container must be reaped by its --name; argv={docker_argv}"
+    assert docker_argv[docker_argv.index("-f") + 1] == named[0], (
+        f"docker rm -f must name the container it created; argv={docker_argv}"
     )
 
 

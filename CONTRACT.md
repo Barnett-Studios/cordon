@@ -59,6 +59,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 |---|---|
 | `--network none` | the `accept` check is local; egress is removed, not filtered — a phone-home fails deterministically instead of silently succeeding against an unintended dependency |
 | `--memory / --cpus / --pids-limit` | a runaway test (fork bomb, unbounded alloc) is OOM-/pid-killed — a bounded non-zero exit, never an unbounded hang |
+| `--memory-swap` pinned equal to `--memory` | without it Docker grants swap up to 2x `--memory`, so a runaway allocation escapes the ceiling on any host with swap instead of being OOM-killed. Not a ceiling — the thing that stops the ceiling being soft, which is why it is here and not in `limits` |
 | wall-clock `timeout` (`CORDON_TIMEOUT`, default 300s) | a busy loop that never trips memory/pid limits (`--cpus` only throttles it) is killed at the deadline via coreutils `timeout`; the container is reaped by a `docker rm -f` cleanup trap. cordon exits **124** (the coreutils timeout convention) — distinct from Docker's 137 OOM/SIGKILL |
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u <invoking uid>:<invoking gid>` | every capability dropped, no escalation, non-root. The uid is read from `id -u`/`id -g`, not fixed: the container writes into a bind-mounted host work tree, so any uid other than the one that owns that tree is a permission error on Linux — where the fixed `1000:1000` only ever worked because Docker Desktop for macOS virtualizes bind-mount ownership. It is not operator-settable, and uid 0 is refused outright rather than run |
@@ -66,7 +67,18 @@ These flags are **not** parameterizable — they are the component's reason to e
 | the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. One path is mounted, so a *nested* repository keeps a writable `.git` — scoped below and in cordon#11 |
 
 Only the resource *ceilings* tune (the contract's `limits`); the isolation flags stay
-literal. `tests/test_cordon_run_script.py` enforces both halves statically.
+literal. `tests/test_cordon_run_script.py` enforces both halves without Docker — the fixed
+flags verbatim, the ceilings via their env seam and defaults, and the wall-clock rows
+behaviourally, by stubbing `timeout` and `docker` and asserting what the script actually
+invoked and exited with.
+
+That claim used to be false in the direction that does not show up in a green run. The audit's
+flag list was hand-written from what someone had noticed, so the whole wall-clock row and
+`--memory-swap` were outside it: deleting the `timeout` wrapper, or the 124 classification, or
+`--memory-swap` each left the suite fully green (cordon#13). The list is now an **allowlist with
+a refusal** — every `-flag` in the `docker run` invocation must be classified as fixed posture or
+tunable ceiling, and an unclassified one fails the audit, so a widened invocation forces the
+decision instead of inheriting a pass.
 
 ## Failure classification
 
