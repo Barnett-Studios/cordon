@@ -252,11 +252,11 @@ def test_a_non_root_invocation_still_runs_with_the_invoking_uid(tmp_path):
 # above for the root refusal.
 
 
-def _run_stubbed(tmp_path, timeout_body, env_extra=None, uid=4242):
+def _run_stubbed(tmp_path, timeout_body, env_extra=None, uid=4242, date_body=None):
     """Invoke the real script with `id`, `docker` and `timeout` stubbed.
 
-    Returns (rc, docker_argv, timeout_argv). `timeout_body` decides what the wrapper
-    does, which is how a deadline breach is simulated without waiting for one.
+    Returns (rc, docker_argv, timeout_argv, stderr). `timeout_body` decides what the
+    wrapper does, which is how a deadline breach is simulated without waiting for one.
     """
     import os
     import subprocess
@@ -271,7 +271,13 @@ def _run_stubbed(tmp_path, timeout_body, env_extra=None, uid=4242):
     )
     (bindir / "timeout").write_text(timeout_body)
     (bindir / "id").write_text(f'#!/bin/sh\nprintf \'%s\\n\' {uid}\n')
-    for name in ("docker", "timeout", "id"):
+    names = ["docker", "timeout", "id"]
+    # The clock is stubbed only where a test needs an EXACT elapsed time; everywhere else
+    # the real `date` runs, so nothing below is measuring a fiction by default.
+    if date_body is not None:
+        (bindir / "date").write_text(date_body)
+        names.append("date")
+    for name in names:
         (bindir / name).chmod(0o755)
 
     work = tmp_path / "work"
@@ -289,6 +295,7 @@ def _run_stubbed(tmp_path, timeout_body, env_extra=None, uid=4242):
         proc.returncode,
         dlog.read_text().splitlines() if dlog.exists() else [],
         tlog.read_text().splitlines() if tlog.exists() else [],
+        proc.stderr,
     )
 
 
@@ -305,7 +312,7 @@ def test_docker_run_is_wrapped_in_the_wall_clock_timeout(tmp_path):
     Red on deleting the wrapper: `timeout` is then never invoked at all, so its log is
     empty and the container has no deadline.
     """
-    rc, docker_argv, timeout_argv = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
+    rc, docker_argv, timeout_argv, _ = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
     assert rc == 0, f"the control run must succeed; docker_argv={docker_argv}"
     assert timeout_argv, (
         "coreutils `timeout` was never invoked — the run is unbounded, and a busy loop "
@@ -326,7 +333,7 @@ def test_docker_run_is_wrapped_in_the_wall_clock_timeout(tmp_path):
 def test_the_wall_clock_ceilings_are_env_overridable(tmp_path):
     """The control on the two assertions above: they must be reading the vars, not two
     numbers that happen to be 10 and 300."""
-    _, _, timeout_argv = _run_stubbed(
+    _, _, timeout_argv, _ = _run_stubbed(
         tmp_path, _TIMEOUT_PASSTHROUGH,
         {"CORDON_TIMEOUT": "42", "CORDON_KILL_AFTER": "7"},
     )
@@ -335,9 +342,45 @@ def test_the_wall_clock_ceilings_are_env_overridable(tmp_path):
 
 
 def test_a_deadline_breach_exits_124(tmp_path):
-    """coreutils returns 124 when the deadline is reached and the process dies on TERM."""
-    rc, _, _ = _run_stubbed(tmp_path, '#!/bin/sh\nexit 124\n')
+    """coreutils returns 124 when the deadline is reached and the process dies on TERM.
+
+    The wrapper must outlast the window for this to be a deadline breach at all. It used
+    to return 124 instantly against the default 300s window — which is a *command* that
+    exited 124, not a breach, and is the case cordon#16 was about.
+    """
+    rc, _, _, err = _run_stubbed(
+        tmp_path, '#!/bin/sh\nsleep 2\nexit 124\n', {"CORDON_TIMEOUT": "1"}
+    )
     assert rc == 124, f"a timeout must surface as the reserved 124; got {rc}"
+    assert "wall-clock timeout" in err, (
+        "a real deadline breach must say so — the classification is what distinguishes "
+        f"it from the command's own 124; stderr={err!r}"
+    )
+
+
+def test_a_fast_124_is_the_commands_own_exit_not_a_deadline_breach(tmp_path):
+    """A command may exit 124 itself — wrapping a check in coreutils `timeout` is the
+    ordinary way a test script bounds itself, and it uses the same code for the same
+    meaning one level down.
+
+    cordon reserved 124 so *"a caller can tell a deadline breach apart from an ordinary
+    non-zero exit"* (CONTRACT.md). For a run that lasted under a second against a 300s
+    window it could not: cordon wrote `command exceeded 300s wall-clock timeout` into the
+    command's own stderr and asserted the deadline explanation as fact.
+
+    The 137 branch beside it already guarded against exactly this with `elapsed`. This is
+    the asymmetry, and `test_an_early_137_is_not_reported_as_a_timeout` is its mirror.
+    """
+    rc, _, _, err = _run_stubbed(
+        tmp_path, '#!/bin/sh\nexit 124\n', {"CORDON_TIMEOUT": "300"}
+    )
+    assert rc == 124, (
+        f"the command's exit code must survive — no transform, no wrapper; got {rc}"
+    )
+    assert "wall-clock" not in err, (
+        "cordon claimed a 300s deadline breach for a run that lasted under a second; "
+        f"stderr={err!r}"
+    )
 
 
 def test_a_kill_escalated_deadline_breach_is_124_not_137(tmp_path):
@@ -348,7 +391,7 @@ def test_a_kill_escalated_deadline_breach_is_124_not_137(tmp_path):
     This is the one that is red on `exit "$rc"` in place of `exit
     "$CORDON_EXIT_TIMEOUT"`: for the plain-124 case above the mutant returns 124 too.
     """
-    rc, _, _ = _run_stubbed(
+    rc, _, _, err = _run_stubbed(
         tmp_path, '#!/bin/sh\nsleep 2\nexit 137\n', {"CORDON_TIMEOUT": "1"}
     )
     assert rc == 124, (
@@ -357,11 +400,42 @@ def test_a_kill_escalated_deadline_breach_is_124_not_137(tmp_path):
     )
 
 
+# `date +%s` has one-second granularity, so a deadline breach that dies promptly on TERM
+# lands with `elapsed` EXACTLY equal to the window — floor(t0 + N) - floor(t0) is N. That
+# is the boundary `-ge` is there for, and a real clock cannot be made to hit it on demand:
+# with CORDON_TIMEOUT=1 and a 1-second stub the answer is 1 or 2 depending on where in the
+# second the run started. Stubbing `date` is what makes the case deterministic rather than
+# a test that passes nine times in ten.
+_CLOCK_EXACTLY_ONE_WINDOW = (
+    "#!/bin/sh\n"
+    'n=$(cat "$CORDON_TEST_CLOCK" 2>/dev/null || echo 0)\n'
+    'n=$((n+1)); printf \'%s\\n\' "$n" > "$CORDON_TEST_CLOCK"\n'
+    'if [ "$n" -eq 1 ]; then printf \'%s\\n\' 1000; else printf \'%s\\n\' 1005; fi\n'
+)
+
+
+def test_a_breach_landing_exactly_on_the_window_is_still_a_breach(tmp_path):
+    """`elapsed -ge`, not `-gt`. With the clock reading 1000 then 1005 against a 5s
+    window, `elapsed` is exactly 5 — the ordinary result for a prompt TERM death, not an
+    edge case — and `-gt` would hand that back as an ordinary non-zero exit with no
+    classification at all."""
+    rc, _, _, err = _run_stubbed(
+        tmp_path,
+        '#!/bin/sh\nexit 124\n',
+        {"CORDON_TIMEOUT": "5", "CORDON_TEST_CLOCK": str(tmp_path / "clock")},
+        date_body=_CLOCK_EXACTLY_ONE_WINDOW,
+    )
+    assert rc == 124, f"got {rc}"
+    assert "wall-clock timeout" in err, (
+        f"a breach whose elapsed equals the window must still be classified; stderr={err!r}"
+    )
+
+
 def test_an_early_137_is_not_reported_as_a_timeout(tmp_path):
     """The other side of it: an OOM-kill fires well before the deadline and must keep
     its own code. Without this, `exit 124` unconditionally on 137 would pass the test
     above while erasing the distinction it exists to make."""
-    rc, _, _ = _run_stubbed(
+    rc, _, _, err = _run_stubbed(
         tmp_path, '#!/bin/sh\nexit 137\n', {"CORDON_TIMEOUT": "300"}
     )
     assert rc == 137, f"a 137 inside the window is an OOM-kill, not a timeout; got {rc}"
@@ -370,7 +444,7 @@ def test_an_early_137_is_not_reported_as_a_timeout(tmp_path):
 def test_the_cleanup_trap_reaps_the_named_container(tmp_path):
     """Killing the `docker run` client leaves the daemon-owned container running, so the
     deadline is only real if the container is reaped by name."""
-    _, docker_argv, _ = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
+    _, docker_argv, _, _ = _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH)
     assert "rm" in docker_argv and "-f" in docker_argv, (
         f"the cleanup trap must docker rm -f the container; argv={docker_argv}"
     )

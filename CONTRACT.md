@@ -90,6 +90,15 @@ deadline breach apart from an ordinary non-zero exit or a 137 OOM-kill. It is st
 "non-zero exit" class every caller already handles — just with a recognizable code —
 so cordon invents no genuinely new failure class; that is deliberate.
 
+**cordon classifies a run as a breach only when the run lasted the window.** Neither
+code identifies one on its own: Docker returns 137 for an OOM-kill that can fire well
+before the deadline, and 124 is what a command that bounds *itself* exits — wrapping a
+check in coreutils `timeout` is the ordinary way a test script does that, one level
+below cordon and using the same code for the same meaning. So the clock decides, and a
+command's own 124 passes through as its exit with nothing added to its stderr. A
+genuine breach cannot be shorter than its own window, so this costs a real timeout
+nothing (cordon#16).
+
 ## The worktree is a trust boundary
 
 The worktree is writable **by design** — the command has to build and test in it. That

@@ -138,9 +138,16 @@ elapsed=$(( $(date +%s) - start ))
 
 # Classify a timeout distinctly. `timeout` returns 124 when the deadline is reached and
 # the process dies on TERM; 137 (128+9) when the --kill-after KILL escalation is needed.
-# Docker also returns 137 for an OOM/SIGKILL that can fire well before the deadline, so
-# 137 is only a timeout when the run actually lasted the full window.
-if [[ "$rc" -eq 124 ]] || { [[ "$rc" -eq 137 ]] && [[ "$elapsed" -ge "$CORDON_TIMEOUT" ]]; }; then
+# NEITHER code is cordon's to assume: Docker returns 137 for an OOM/SIGKILL that can fire
+# well before the deadline, and 124 is what a command that bounds ITSELF exits — wrapping
+# a check in coreutils `timeout` is the ordinary way a test script does that, using the
+# same code for the same meaning one level down. So the clock decides for both, and the
+# reserved code keeps the meaning CONTRACT.md gives it: a caller can tell a deadline
+# breach apart from an ordinary non-zero exit. Asked of only 137, this let cordon write
+# "exceeded 300s wall-clock timeout" into the stderr of a run that lasted under a second
+# (cordon#16). A genuine breach cannot be shorter than its own window, so requiring the
+# window to have elapsed costs a real timeout nothing.
+if { [[ "$rc" -eq 124 ]] || [[ "$rc" -eq 137 ]]; } && [[ "$elapsed" -ge "$CORDON_TIMEOUT" ]]; then
   echo "cordon: command exceeded ${CORDON_TIMEOUT}s wall-clock timeout — container killed" >&2
   exit "$CORDON_EXIT_TIMEOUT"
 fi
