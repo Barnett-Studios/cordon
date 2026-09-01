@@ -44,6 +44,26 @@ RUNTIME_IMAGE="$2"
 shift 2
 ACCEPT_CMD=("$@")
 
+# THE WORKTREE IS A MOUNT SOURCE, NOT A NAME.
+# `docker run -v` CREATES a missing bind source, and reads a RELATIVE one as a named
+# volume. Either way the accept command is handed an empty /work: an absence-shaped
+# check ("no TODO markers", "lint is clean") then passes vacuously, and everything the
+# command writes lands somewhere the caller never reads. The .git block below already
+# reasons about the first half of this for /work/.git — it applies to /work itself.
+#
+# One `cd` does both halves: it fails for anything that is not a directory we can enter
+# (missing, a plain file, a dangling symlink, unreadable), and `pwd -P` yields the
+# absolute real path, so -v can never mean "named volume". A separate `[[ -d ]]` test
+# ahead of it is redundant — measured: deleting it changed no outcome, because the `cd`
+# fails on exactly the same inputs. Explicit `if !`, not set -e on the assignment, so
+# the refusal is cordon's own message rather than a bash diagnostic.
+if ! WORKTREE_ABS="$(cd -- "$WORKTREE" 2>/dev/null && pwd -P)"; then
+  echo "cordon: worktree '$WORKTREE' is not a directory this user can enter — refusing" >&2
+  echo "cordon: to run an accept check against a mount docker would create empty" >&2
+  exit 1
+fi
+WORKTREE="$WORKTREE_ABS"
+
 # Resource ceilings — overridable; security flags below are not.
 CORDON_MEMORY="${CORDON_MEMORY:-2g}"
 CORDON_CPUS="${CORDON_CPUS:-2}"

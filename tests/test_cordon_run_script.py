@@ -495,3 +495,141 @@ def test_rc1_container_absolute_payload_would_be_vacuous(tmp_path):
     assert not (worktree / "PWNED_ABS").exists(), (
         "unexpected: a container-absolute hooksPath resolved on the host"
     )
+
+
+# ── The worktree is a mount source, not a name (cordon#15) ─────────────────────
+#
+# `docker run -v` accepts two things the caller never meant. A MISSING source is
+# created as an empty directory; a RELATIVE source is read as a NAMED VOLUME. Either
+# way the accept command gets an empty `/work` — so an absence-shaped check ("no TODO
+# markers", "lint is clean") passes vacuously, and everything the command writes lands
+# somewhere the caller never reads. Measured on v0.1.3: a missing path gave rc=0 and
+# materialized the directory on the host; a bare relative name gave rc=0 and created a
+# docker volume.
+#
+# The script already reasons about exactly this Docker behaviour — for `/work/.git`:
+#
+#     CONDITIONAL, because `docker run -v` CREATES a missing bind source.
+#
+# Correct there, and never applied to `/work` itself.
+#
+# These run against the real script with the same docker/timeout stubs as the root
+# refusal above, so they assert on the argv the container would receive — not on the
+# source text that computes it — and need no Docker.
+
+
+def _run_with_worktree(tmp_path, worktree_arg, cwd=None):
+    """Invoke the real script with docker/timeout/id stubbed. -> (rc, stderr, argv)."""
+    import os
+    import subprocess
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "docker.log"
+    for name, body in _STUBS.items():
+        f = bindir / name
+        f.write_text(body)
+        f.chmod(0o755)
+    # Non-root, so the uid refusal above cannot be what these measure — otherwise a CI
+    # runner that happens to be root would turn every assertion below green for the
+    # wrong reason.
+    idstub = bindir / "id"
+    idstub.write_text("#!/bin/sh\nprintf '%s\\n' 4242\n")
+    idstub.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["CORDON_TEST_LOG"] = str(log)
+    proc = subprocess.run(
+        [str(SCRIPT), str(worktree_arg), "img:latest", "true"],
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    argv = log.read_text().splitlines() if log.exists() else []
+    return proc.returncode, proc.stderr, argv
+
+
+def _work_mount(argv):
+    """The `-v` source docker was handed for /work, or None."""
+    for i, a in enumerate(argv):
+        if a == "-v" and i + 1 < len(argv) and argv[i + 1].endswith(":/work:rw"):
+            return argv[i + 1].rsplit(":/work:rw", 1)[0]
+    return None
+
+
+def test_a_missing_worktree_is_refused_before_docker_runs(tmp_path):
+    ghost = tmp_path / "ghost-wt"
+    rc, err, argv = _run_with_worktree(tmp_path, ghost)
+    assert rc == 1, f"a worktree that does not exist must be refused; err={err!r}"
+    assert "ghost-wt" in err, f"the refusal must name the offending path: {err!r}"
+    # Message contract, and the ONLY thing separating the explicit refusal from letting
+    # `set -e` abort on the failed `cd`: that mutant refuses the same inputs with the
+    # same code and also names the path, but says it as a line-numbered bash diagnostic
+    # about the script's internals rather than as cordon telling the caller what it
+    # refused. Every other refusal in this script is branded and states its reason.
+    assert "cordon:" in err, f"the refusal must be cordon's own, not a bash trace: {err!r}"
+    # `run`, not `docker` — the cleanup trap legitimately calls `docker rm -f` on every
+    # exit path, so asserting docker was never invoked at all would fail on that.
+    assert "run" not in argv, (
+        f"docker run was reached with a source it would create empty; argv={argv}"
+    )
+
+
+def test_a_file_is_not_a_worktree(tmp_path):
+    # `-v /path/to/file:/work` binds a FILE over the mount point. The contract says
+    # worktree is a host directory, and the guard must be `-d`, not `-e`.
+    f = tmp_path / "notadir.txt"
+    f.write_text("x\n")
+    rc, err, argv = _run_with_worktree(tmp_path, f)
+    assert rc == 1, f"a file is not a worktree; err={err!r}"
+    assert "notadir.txt" in err, f"the refusal must name the offending path: {err!r}"
+    assert "run" not in argv, f"docker run was reached with a file as /work; argv={argv}"
+
+
+def test_a_relative_worktree_never_reaches_docker_as_a_bare_name(tmp_path):
+    # A relative path that EXISTS — so the existence guard alone does not save it.
+    # `-v cordplain:/work` is a named volume, and the accept command sees an empty tree.
+    wt = tmp_path / "cordplain"
+    wt.mkdir()
+    (wt / "src.txt").write_text("TODO: unfinished\n")
+
+    rc, err, argv = _run_with_worktree(tmp_path, "cordplain", cwd=tmp_path)
+    src = _work_mount(argv)
+    assert rc == 0, f"an existing relative worktree must still run; err={err!r}"
+    assert src is not None, f"nothing was bound at /work; argv={argv}"
+    assert src.startswith("/"), (
+        f"a relative worktree reached -v as a bare name — docker reads that as a named "
+        f"volume, not this directory; -v {src}:/work:rw"
+    )
+    assert (pathlib.Path(src) / "src.txt").exists(), (
+        f"the resolved mount source is not the directory that was asked for: {src}"
+    )
+
+
+def test_an_absolute_worktree_still_reaches_docker_bound_at_work(tmp_path):
+    """The control. Without it, a script that refused every worktree satisfies all
+    three assertions above while the sandbox never runs at all."""
+    wt = tmp_path / "real-wt"
+    wt.mkdir()
+    rc, err, argv = _run_with_worktree(tmp_path, wt)
+    assert rc == 0, f"a real absolute worktree must run; err={err!r} argv={argv}"
+    assert _work_mount(argv) == str(wt.resolve()), (
+        f"the worktree must be bound rw at /work; argv={argv}"
+    )
+
+
+def test_a_symlinked_worktree_is_bound_by_its_real_path(tmp_path):
+    # `-v` is resolved by the DAEMON, in its own filesystem namespace — a host symlink
+    # is not a path it can be relied on to follow. Resolving here means the mount source
+    # is the directory that was asked for.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    rc, err, argv = _run_with_worktree(tmp_path, link)
+    assert rc == 0, f"a symlinked worktree must still run; err={err!r}"
+    assert _work_mount(argv) == str(real.resolve()), (
+        f"the mount source must be the real directory, not the link; argv={argv}"
+    )

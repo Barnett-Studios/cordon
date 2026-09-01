@@ -28,6 +28,12 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
   inside the tree keeps a writable one (see *The worktree is a trust boundary*).
   The intended input is a disposable per-node git work tree (one clean baseline commit),
   the same volume shape a driving harness provisions.
+  It must be a directory the invoking user can enter; cordon resolves it to an absolute
+  real path and **refuses with exit 1** otherwise. `docker run -v` would otherwise create
+  a missing source as an empty directory and read a relative one as a *named volume* —
+  either way the command gets an empty `/work`, so an absence-shaped accept check ("no
+  TODO markers", "lint is clean") passes vacuously and the command's writes are
+  discarded (cordon#15).
 - **command** — the node's `accept` check (compile / test / grep). Its stdout+stderr are
   cordon's stdout+stderr; its exit code is cordon's exit code. No transform, no wrapper.
 - **limits** — the resource ceilings, via env: `CORDON_MEMORY` (default `2g`),
