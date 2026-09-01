@@ -620,6 +620,53 @@ def test_an_absolute_worktree_still_reaches_docker_bound_at_work(tmp_path):
     )
 
 
+def test_an_empty_worktree_is_refused_rather_than_resolved_to_the_callers_cwd(tmp_path):
+    """`cd -- ""` is a no-op that SUCCEEDS on bash 3.2 — macOS's /bin/bash, this
+    component's supported platform — so a resolution-only guard hands `-v` the caller's own
+    cwd and mounts it rw at /work. Measured on the first version of this fix: rc=0, docker
+    reached, `-v <caller's cwd>:/work:rw`, with a host file the caller never named sitting
+    in it. The #15 shape unchanged, and a REGRESSION: before the guard existed the same
+    input reached docker as `-v :/work:rw` and was refused loudly with 125.
+
+    On bash >= 4.2 `cd -- ""` fails, so on CI this test is a control rather than a
+    discriminator — it passes with or without the `[[ -d ]]` half. That is exactly why the
+    structural assertion below exists: the platform where the hole opens is not the platform
+    the suite runs on.
+    """
+    caller = tmp_path / "callercwd"
+    caller.mkdir()
+    (caller / "PRIVATE-HOST-FILE.txt").write_text("TODO: unfinished\n")
+    rc, err, argv = _run_with_worktree(tmp_path, "", cwd=caller)
+    assert _work_mount(argv) != str(caller.resolve()), (
+        "an empty worktree argument mounted the CALLER'S CWD rw at /work — an "
+        f"absence-shaped check then runs against a tree nobody named; argv={argv}"
+    )
+    assert rc == 1, f"an empty worktree must be refused; rc={rc} err={err!r}"
+    assert "run" not in argv, f"docker run was reached with an empty worktree; argv={argv}"
+
+
+def test_the_worktree_guard_tests_the_argument_and_not_only_cd(tmp_path):
+    """Textual, deliberately, and the only assertion in this file that has to be.
+
+    The behavioural test above cannot discriminate on bash >= 4.2, which is every CI
+    runner here, so dropping `[[ -d "$WORKTREE" ]]` would be green on CI and mount the
+    caller's cwd on macOS. This asserts the property directly: the refusal is cordon's own
+    decision about the argument, not a side effect of what some bash's `cd` happens to do
+    with an empty string.
+    """
+    # Comments stripped first. Written against the whole file, this passed with the guard
+    # DELETED — the comment above the guard quotes it, and a text assertion cannot tell a
+    # rule from a sentence describing one. Caught by running the mutation; it is the third
+    # time in this file that a textual assertion was satisfied by prose.
+    code = "\n".join(
+        line for line in SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+    assert re.search(r'\[\[\s+!\s+-d\s+"\$WORKTREE"\s+\]\]', code), (
+        "the worktree guard must test the argument itself; a resolution-only guard "
+        "resolves \"\" to the caller's cwd on bash 3.2"
+    )
+
+
 def test_a_symlinked_worktree_is_bound_by_its_real_path(tmp_path):
     # `-v` is resolved by the DAEMON, in its own filesystem namespace — a host symlink
     # is not a path it can be relied on to follow. Resolving here means the mount source

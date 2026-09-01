@@ -51,15 +51,20 @@ ACCEPT_CMD=("$@")
 # command writes lands somewhere the caller never reads. The .git block below already
 # reasons about the first half of this for /work/.git — it applies to /work itself.
 #
-# One `cd` does both halves: it fails for anything that is not a directory we can enter
-# (missing, a plain file, a dangling symlink, unreadable), and `pwd -P` yields the
-# absolute real path, so -v can never mean "named volume". A separate `[[ -d ]]` test
-# ahead of it is redundant — measured: deleting it changed no outcome, because the `cd`
-# fails on exactly the same inputs. Explicit `if !`, not set -e on the assignment, so
-# the refusal is cordon's own message rather than a bash diagnostic.
-if ! WORKTREE_ABS="$(cd -- "$WORKTREE" 2>/dev/null && pwd -P)"; then
-  echo "cordon: worktree '$WORKTREE' is not a directory this user can enter — refusing" >&2
-  echo "cordon: to run an accept check against a mount docker would create empty" >&2
+# Two tests, and the pair is not redundant. `cd` rejects almost everything `[[ -d ]]`
+# does — missing, a plain file, a dangling symlink, unreadable — and `pwd -P` then yields
+# the absolute real path so -v can never mean "named volume". But `cd -- ""` is a no-op
+# that SUCCEEDS on bash 3.2, which is macOS's /bin/bash and this component's supported
+# platform, so the resolution alone would resolve an EMPTY argument to the caller's own
+# cwd and mount it rw at /work. It fails on bash >= 4.2, i.e. exactly where CI runs, so
+# that hole is open where cordon is used and closed where it is tested.
+#
+# `[[ ! -d "$WORKTREE" ]]` is cordon's own decision about the argument and reads the same
+# on every bash. Same argument as the explicit `if !` below it: a refusal inherited from
+# another command's semantics is a refusal you do not control.
+if [[ ! -d "$WORKTREE" ]] || ! WORKTREE_ABS="$(cd -- "$WORKTREE" 2>/dev/null && pwd -P)"; then
+  echo "cordon: worktree '$WORKTREE' is not a directory this user can enter — refusing to" \
+       "run an accept check against a mount docker would create empty" >&2
   exit 1
 fi
 WORKTREE="$WORKTREE_ABS"
