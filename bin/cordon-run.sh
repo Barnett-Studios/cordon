@@ -54,13 +54,16 @@ ACCEPT_CMD=("$@")
 # Two tests, and the pair is not redundant. `cd` rejects almost everything `[[ -d ]]`
 # does — missing, a plain file, a dangling symlink, unreadable — and `pwd -P` then yields
 # the absolute real path so -v can never mean "named volume". But `cd -- ""` is a no-op
-# that SUCCEEDS on bash 3.2, which is macOS's /bin/bash and this component's supported
-# platform, so the resolution alone would resolve an EMPTY argument to the caller's own
-# cwd and mount it rw at /work. It fails on bash >= 4.2, i.e. exactly where CI runs, so
-# that hole is open where cordon is used and closed where it is tested.
+# that SUCCEEDS on almost every bash in service — measured: macOS 3.2.57, ubuntu 5.1.16,
+# debian 5.2.15, ubuntu 5.2.21 (the ubuntu-latest base) and python:3.12-slim 5.2.37 all
+# accept it and land on the caller's cwd; only 5.3.15 refuses. So the resolution alone
+# resolves an EMPTY argument to the caller's own cwd and mounts it rw at /work, on every
+# platform cordon runs on today.
 #
 # `[[ ! -d "$WORKTREE" ]]` is cordon's own decision about the argument and reads the same
-# on every bash. Same argument as the explicit `if !` below it: a refusal inherited from
+# on every bash — including the 5.3 that starts refusing `cd -- ""` by itself, where a
+# guard resting on `cd` would keep working for a reason that had changed underneath it.
+# Same argument as the explicit `if !` below it: a refusal inherited from
 # another command's semantics is a refusal you do not control.
 if [[ ! -d "$WORKTREE" ]] || ! WORKTREE_ABS="$(cd -- "$WORKTREE" 2>/dev/null && pwd -P)"; then
   echo "cordon: worktree '$WORKTREE' is not a directory this user can enter — refusing to" \

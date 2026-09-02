@@ -628,10 +628,14 @@ def test_an_empty_worktree_is_refused_rather_than_resolved_to_the_callers_cwd(tm
     in it. The #15 shape unchanged, and a REGRESSION: before the guard existed the same
     input reached docker as `-v :/work:rw` and was refused loudly with 125.
 
-    On bash >= 4.2 `cd -- ""` fails, so on CI this test is a control rather than a
-    discriminator — it passes with or without the `[[ -d ]]` half. That is exactly why the
-    structural assertion below exists: the platform where the hole opens is not the platform
-    the suite runs on.
+    This test discriminates on every bash in service today, CI included — measured on the
+    ubuntu-latest base (bash 5.2.21) with the `[[ -d ]]` half dropped: it goes RED there,
+    not only here. The hole was open on the runner too.
+
+    The structural assertion below is for the OTHER end of the timeline. bash 5.3 has
+    shipped and refuses `cd -- ""` by itself; the day a runner picks it up, this test
+    silently becomes a control — passing whether or not the guard exists — with nothing
+    announcing the change. That assertion is what will still be killing the mutation then.
     """
     caller = tmp_path / "callercwd"
     caller.mkdir()
@@ -648,11 +652,10 @@ def test_an_empty_worktree_is_refused_rather_than_resolved_to_the_callers_cwd(tm
 def test_the_worktree_guard_tests_the_argument_and_not_only_cd(tmp_path):
     """Textual, deliberately, and the only assertion in this file that has to be.
 
-    The behavioural test above cannot discriminate on bash >= 4.2, which is every CI
-    runner here, so dropping `[[ -d "$WORKTREE" ]]` would be green on CI and mount the
-    caller's cwd on macOS. This asserts the property directly: the refusal is cordon's own
-    decision about the argument, not a side effect of what some bash's `cd` happens to do
-    with an empty string.
+    The behavioural test above stops discriminating the moment a runner ships bash 5.3,
+    whose `cd -- ""` fails on its own — and it stops silently, still green. This asserts the
+    property directly and on every bash: the refusal is cordon's own decision about the
+    argument, not a side effect of what some `cd` happens to do with an empty string.
     """
     # Comments stripped first. Written against the whole file, this passed with the guard
     # DELETED — the comment above the guard quotes it, and a text assertion cannot tell a
