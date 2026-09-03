@@ -70,7 +70,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u <invoking uid>:<invoking gid>` | every capability dropped, no escalation, non-root. The uid is read from `id -u`/`id -g`, not fixed: the container writes into a bind-mounted host work tree, so any uid other than the one that owns that tree is a permission error on Linux — where the fixed `1000:1000` only ever worked because Docker Desktop for macOS virtualizes bind-mount ownership. It is not operator-settable, and uid 0 is refused outright rather than run |
 | `--rm` (ephemeral, per command) | no state leaks between runs — matches the per-node ephemeral work tree it mounts |
-| the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. One path is mounted, so a *nested* repository keeps a writable `.git` — scoped below and in cordon#11 |
+| the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. Only the paths reachable from `<worktree>/.git` are mounted — that file or directory, and for a linked worktree the parent repository it points back to — so a repository *nested* anywhere inside the tree keeps a writable `.git` and is not discovered. Scoped below and in cordon#11 |
 
 Only the resource *ceilings* tune (the contract's `limits`); the isolation flags stay
 literal. `tests/test_cordon_run_script.py` enforces both halves without Docker — the fixed
@@ -176,9 +176,10 @@ creates. A `.git` file *hand-edited* to name a symlinked path is outside that ag
 for the symlinked path, which is not what was mounted, and the run fails exactly as it did before
 this fix. cordon makes no claim there.
 
-**What this does not cover — 1: any other repository.** The mount is a single path,
-`<worktree>/.git`. Closing it closes host execution via git *for the repository cordon was
-handed*, and for no other. A vendored clone at `sub/` keeps a writable `sub/.git`, and a
+**What this does not cover — 1: any other repository.** What is mounted is reached from
+`<worktree>/.git` and nothing else — that file or directory, plus the parent repository a linked
+worktree's pointer names. Nothing walks the tree looking for other repositories. Closing this
+closes host execution via git *for the repository cordon was handed*, and for no other. A vendored clone at `sub/` keeps a writable `sub/.git`, and a
 container that appends `[core] hooksPath` there gets host execution the next time the host runs
 git inside `sub/`. A **local** `core.hooksPath` outranks a global one, so a `~/.git-hooks`
 installed repo-wide — as dotclaude installs one — does not mitigate the config variant.

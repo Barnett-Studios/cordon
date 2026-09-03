@@ -32,7 +32,9 @@ execution the next time *you* run git — an escape that happens outside the con
 it exited, and that none of the boundaries above would ever see.
 
 **That closes host execution via git for the repository cordon was handed — that one, and no
-other.** The mount is a single path, `<worktree>/.git`. A repository *nested* inside the tree — a
+other.** What is mounted is reached from `<worktree>/.git` — that path, plus the parent repository
+a linked worktree points back to; nothing walks the tree looking for others. A repository *nested*
+inside the tree — a
 vendored clone at `sub/` with its own `.git` — keeps a fully writable one, and a container that
 appends `[core] hooksPath` to `sub/.git/config` gets host execution the next time you run git in
 `sub/`. A local `core.hooksPath` outranks a global one, so the `~/.git-hooks` that dotclaude
