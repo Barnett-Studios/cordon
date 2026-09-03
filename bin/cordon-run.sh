@@ -162,12 +162,41 @@ if [[ -f "$WORKTREE/.git" ]]; then
           common="$common_resolved"
         fi
       fi
-      # Sanity, because this path comes out of a file inside the worktree — which the sandboxed
-      # command can write. A `commondir` rewritten to `/` would otherwise ask docker to bind the
-      # host root into the container. Requiring the marks of a real git directory keeps a
-      # forged pointer from choosing the mount source, and a forged-but-valid one can still only
-      # name a git directory, read-only.
-      if [[ -e "$common/HEAD" && -d "$common/objects" ]]; then
+      # THE BACK-POINTER IS THE AUTHORISATION, and it has to be, because the `.git` file this
+      # chain starts from lives in `/work` — the one WRITABLE mount. A sandboxed command that
+      # ran over a directory with no `.git` can write one, and on the next run this block would
+      # read it. Checking `commondir` (which lives inside the read-only mount) guarded the file
+      # the command CANNOT reach while leaving the one it can unguarded — inverted.
+      #
+      # `git worktree add` writes both halves: `<worktree>/.git` names `<parent>/.git/worktrees/
+      # <name>`, and `<parent>/.git/worktrees/<name>/gitdir` names `<worktree>/.git` back. The
+      # forward half is forgeable from inside the sandbox; the back half is not, because writing
+      # it means already having write access to the repository being named. Requiring them to
+      # agree is what makes "its parent repository" in CONTRACT.md true rather than aspirational.
+      #
+      # `--separate-git-dir` writes NO back-pointer and no `core.worktree`, so it is not
+      # verifiable from the host and gets the `.git` file mount and nothing more. That shape is
+      # also precisely what a forgery imitates, so accepting it would accept the forgery.
+      # CONTRACT.md says so; a consumer must be able to find that rather than discover it.
+      backptr=""
+      if [[ -f "$gitdir/gitdir" ]]; then
+        backptr_raw="$(head -n 1 "$gitdir/gitdir")"
+        if [[ -n "$backptr_raw" ]]; then
+          if [[ "$backptr_raw" != /* ]]; then
+            backptr_raw="$gitdir/$backptr_raw"
+          fi
+          # The back-pointer names a FILE (`<worktree>/.git`), so resolve its directory and
+          # re-append — `cd` cannot enter a file, and `$WORKTREE` above was resolved the same way.
+          backptr_dir="$(cd -- "$(dirname -- "$backptr_raw")" 2>/dev/null && pwd -P)" || backptr_dir=""
+          if [[ -n "$backptr_dir" ]]; then
+            backptr="$backptr_dir/$(basename -- "$backptr_raw")"
+          fi
+        fi
+      fi
+      # The `HEAD`/`objects` check stays. It is now the second of two, not the only one: it
+      # keeps a `commondir` rewritten to `/` from naming the host root even for a worktree
+      # whose back-pointer is genuine.
+      if [[ "$backptr" == "$WORKTREE/.git" && -e "$common/HEAD" && -d "$common/objects" ]]; then
         GIT_MOUNT+=(-v "$common":"$common":ro)
         # Normally `worktrees/<name>` is inside the common dir and already covered. With
         # `--separate-git-dir` it need not be, and a mount that resolves the pointer only

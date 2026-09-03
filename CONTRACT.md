@@ -140,10 +140,33 @@ mounts nothing beyond that node.
 What the widening does *not* cost is the seal. Every added mount is `:ro`, including the
 **shared** `hooks/` directory a linked worktree uses — which lives in the parent and is now
 explicitly read-only rather than merely unreachable; a write to it is refused by the filesystem.
-Only `/work` is writable, in either shape. cordon also refuses to add the mount when the pointer
-dangles (`docker run -v` would create the missing source, inside someone's repository) or when the
-resolved path does not look like a git directory (`HEAD` and `objects/` present) — `commondir`
-lives inside the git directory, and a forged pointer must not be able to choose a bind source.
+Only `/work` is writable, in either shape.
+
+**"Its parent repository" is verified, not assumed.** The `.git` pointer file lives in `/work` —
+the one **writable** mount — so a sandboxed command that ran over a directory with no `.git` can
+write one, and a later run would otherwise bind whatever it named. Requiring only the marks of a
+git directory (`HEAD`, `objects/`) does not close that: the forged target *is* a git directory.
+
+So cordon requires the **back-pointer**. `git worktree add` writes both halves —
+`<worktree>/.git` names `<parent>/.git/worktrees/<name>`, and
+`<parent>/.git/worktrees/<name>/gitdir` names `<worktree>/.git` back — and cordon mounts only when
+they agree. The forward half is writable from inside the sandbox; the back half is not, because
+writing it means already holding write access to the repository being named.
+
+cordon also still refuses when the pointer dangles (`docker run -v` would create the missing
+source, inside someone's repository) and when the resolved common directory does not look like a
+git directory, which keeps a `commondir` rewritten to `/` from naming the host root even for a
+worktree whose back-pointer is genuine.
+
+**What this costs: `--separate-git-dir` gets the pointer file and nothing more.**
+`git init --separate-git-dir=<path>` writes no back-pointer in `<path>` and no `core.worktree` in
+its config, so from the host that shape is **indistinguishable from a forgery** — it is exactly
+what a forgery imitates. cordon does not widen the read surface for it: `.git` is mounted read-only
+as the file it is, and a command needing git state in that shape sees the same
+`fatal: not a git repository` a linked worktree saw before cordon#17. Stated here rather than left
+to be discovered, and asserted in `tests/test_cordon_run_script.py` — including the fixture premise,
+so if a future git starts writing that back-pointer the test fails rather than quietly recording a
+limitation that no longer exists.
 
 One boundary, stated rather than left to be discovered: the mount source is a **resolved real
 path**, because `-v` is resolved by the daemon in its own filesystem namespace. git writes the

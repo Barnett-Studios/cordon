@@ -854,10 +854,11 @@ def test_a_dangling_gitdir_pointer_mounts_nothing_extra(tmp_path):
     )
 
 
-def test_a_forged_commondir_cannot_choose_the_mount_source(tmp_path):
-    """`commondir` lives inside the git directory, and the sandboxed command has had a turn at
-    the worktree. A pointer rewritten to `/` must not become a bind source: the resolved path
-    has to look like a git directory before it is mounted."""
+def test_a_commondir_pointing_at_the_host_root_is_refused(tmp_path):
+    """Renamed (PR #27 review): the old name claimed a forged `commondir` could not choose the
+    mount source, and this body only ever tried `/`, which the `HEAD`/`objects` check rejects.
+    The general property now belongs to the back-pointer tests below. This pins the narrow
+    thing it actually measures — the host root never becomes a bind source."""
     main, linked = _linked_worktree(tmp_path)
     gitdir = main / ".git" / "worktrees" / "linked"
     (gitdir / "commondir").write_text("/\n")
@@ -944,3 +945,111 @@ def test_the_mount_source_is_a_resolved_real_path(tmp_path):
     for m in _mounts(argv):
         src = m.rsplit(":", 2)[0]
         assert not os.path.islink(src), f"a symlink must never be a bind source: {src}"
+
+
+def test_a_forged_gitdir_pointer_cannot_choose_the_mount_source(tmp_path):
+    """The Blocking finding on PR #27, reproduced then pinned.
+
+    `<worktree>/.git` lives in `/work` — the ONE writable mount. A sandboxed command
+    that ran over a directory with no `.git` can write one, and on the next run this
+    block would read it and bind whatever it names. Guarding `commondir` (inside the
+    read-only mount) protected the file the command cannot reach while leaving the
+    one it can unguarded.
+
+    Here `victim` is not a worktree of anything: a plain directory carrying a
+    hand-written pointer at an unrelated real repository. Every mark the old guard
+    looked for is present on the target, because the target IS a git directory.
+    """
+    main, _linked = _linked_worktree(tmp_path)
+    unrelated = (main / ".git").resolve()
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / ".git").write_text(f"gitdir: {unrelated}\n")
+
+    rc, err, argv = _run_with_worktree(tmp_path, victim)
+    assert rc == 0, f"err={err!r}"
+    mounts = _mounts(argv)
+    assert f"{unrelated}:{unrelated}:ro" not in mounts, (
+        f"an unrelated repository was mounted because a file inside the writable "
+        f"worktree said so; mounts={mounts}"
+    )
+    for m in mounts:
+        assert str(unrelated) not in m.split(":")[0] or m.startswith(f"{victim.resolve()}"), (
+            f"the forged target leaked into a mount source: {m}"
+        )
+    # The pointer file itself is still sealed — refusing to widen is not refusing to run.
+    assert f"{victim.resolve()}/.git:/work/.git:ro" in mounts, mounts
+
+
+def test_a_genuine_linked_worktree_is_still_mounted(tmp_path):
+    """The control, and the reason this is option (a) and not "stop mounting".
+
+    #17's whole point is that an accept check inside the sandbox can read git state.
+    A guard that refused the forgery by refusing everything would close the finding
+    and reopen the issue.
+    """
+    main, linked = _linked_worktree(tmp_path)
+    parent_git = str((main / ".git").resolve())
+    rc, err, argv = _run_with_worktree(tmp_path, linked)
+    assert rc == 0, f"err={err!r}"
+    assert f"{parent_git}:{parent_git}:ro" in _mounts(argv), (
+        f"the back-pointer is genuine, so the parent must still be mounted; {_mounts(argv)}"
+    )
+
+
+def test_a_worktree_whose_back_pointer_names_someone_else_is_refused(tmp_path):
+    """The narrow forgery: a REAL linked worktree of A, with its `.git` file rewritten
+    to point at B's worktree administrative directory. B's back-pointer names B's
+    worktree, not this one, so the two halves disagree and the mount is refused.
+
+    This is the case a `HEAD`/`objects` check can never catch — B is a real git
+    directory with everything in place.
+    """
+    main_a, linked_a = _linked_worktree(tmp_path / "a", name="wt-a")
+    main_b, linked_b = _linked_worktree(tmp_path / "b", name="wt-b")
+    b_admin = (main_b / ".git" / "worktrees" / "wt-b").resolve()
+    b_git = (main_b / ".git").resolve()
+
+    (linked_a / ".git").write_text(f"gitdir: {b_admin}\n")
+
+    rc, err, argv = _run_with_worktree(tmp_path, linked_a)
+    assert rc == 0, f"err={err!r}"
+    mounts = _mounts(argv)
+    assert f"{b_git}:{b_git}:ro" not in mounts, (
+        f"B's repository was mounted into A's sandbox; mounts={mounts}"
+    )
+    assert f"{b_admin}:{b_admin}:ro" not in mounts, mounts
+
+
+def test_separate_git_dir_gets_the_pointer_file_and_no_more(tmp_path):
+    """`git init --separate-git-dir` writes NO back-pointer and no `core.worktree`, so
+    from the host it is indistinguishable from the forgery above. CONTRACT.md says it
+    gets the `.git` file mount and nothing more; this asserts that rather than leaving
+    it to prose.
+
+    Asserted as a fixture premise first: if a future git starts writing a back-pointer
+    for this shape, this test must fail loudly rather than quietly assert a limitation
+    that no longer exists.
+    """
+    import subprocess
+
+    work = tmp_path / "work"
+    realgit = tmp_path / "realgit"
+    subprocess.run(
+        ["git", "init", "-q", f"--separate-git-dir={realgit}", str(work)],
+        check=True,
+    )
+    assert (work / ".git").is_file(), "fixture premise: .git is a pointer file"
+    assert not (realgit / "gitdir").exists(), (
+        "fixture premise CHANGED: git now writes a back-pointer for --separate-git-dir, "
+        "so this shape is verifiable and the limitation this test records is stale"
+    )
+
+    rc, err, argv = _run_with_worktree(tmp_path, work)
+    assert rc == 0, f"err={err!r}"
+    mounts = _mounts(argv)
+    assert f"{realgit.resolve()}:{realgit.resolve()}:ro" not in mounts, (
+        f"unverifiable shape must not widen the read surface; mounts={mounts}"
+    )
+    assert f"{work.resolve()}/.git:/work/.git:ro" in mounts, mounts
