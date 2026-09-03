@@ -116,6 +116,70 @@ if [[ -e "$WORKTREE/.git" ]]; then
   GIT_MOUNT=(-v "$WORKTREE/.git":/work/.git:ro)
 fi
 
+# A LINKED WORKTREE'S .git IS A POINTER, AND MOUNTING IT ALONE MOUNTS NOTHING.
+# For `git worktree add`, `.git` is a FILE holding `gitdir: <absolute host path>`. The mount
+# above puts the file inside the container, so the seal holds in both shapes — but the path it
+# names is not mounted anywhere, and git resolves the pointer to nothing:
+#
+#   fatal: not a git repository: /.../main/.git/worktrees/<name>
+#
+# That loses the other half of the same decision. `.git` is mounted read-only RATHER THAN
+# EXCLUDED so an accept that reads git state still works; for a linked worktree it did not
+# (cordon#17). The objects live in the PARENT repository — `worktrees/<name>/commondir` points
+# back to it — so mounting only `worktrees/<name>` is not enough.
+#
+# THE COST, chosen deliberately (founder decision on cordon#17, over the alternative of
+# documenting the limitation): this widens the sandbox's READ surface from this worktree's git
+# to the whole repository's git. A harness that provisions nodes as linked worktrees of one
+# shared repository puts every node's baseline in that one object store, so every other node's
+# content becomes readable from inside any node's sandbox. Read-only does not narrow that and
+# nothing narrower works. CONTRACT.md states it; a consumer must be able to find it rather than
+# discover it.
+#
+# The seal is unaffected: every added mount is `:ro`, including the SHARED `hooks/` directory a
+# linked worktree uses, which lives in the parent and is now explicitly read-only rather than
+# merely unreachable.
+if [[ -f "$WORKTREE/.git" ]]; then
+  # The pointer. A relative one resolves against the worktree; `git worktree add` writes an
+  # absolute path, but the file format permits either.
+  gitdir_raw="$(sed -n 's/^gitdir: *//p' "$WORKTREE/.git" | head -n 1)"
+  if [[ -n "$gitdir_raw" ]]; then
+    if [[ "$gitdir_raw" != /* ]]; then
+      gitdir_raw="$WORKTREE/$gitdir_raw"
+    fi
+    # `cd && pwd -P`, the same resolution the worktree argument gets above: portable (macOS
+    # ships no `readlink -f`), and it FAILS when the path does not exist. That failure is the
+    # guard, not a nicety — `docker run -v` CREATES a missing bind source, so resolving first is
+    # what stops a dangling pointer from materializing a directory inside someone's repository.
+    if gitdir="$(cd -- "$gitdir_raw" 2>/dev/null && pwd -P)"; then
+      common="$gitdir"
+      if [[ -f "$gitdir/commondir" ]]; then
+        common_raw="$(head -n 1 "$gitdir/commondir")"
+        if [[ "$common_raw" != /* ]]; then
+          common_raw="$gitdir/$common_raw"
+        fi
+        if common_resolved="$(cd -- "$common_raw" 2>/dev/null && pwd -P)"; then
+          common="$common_resolved"
+        fi
+      fi
+      # Sanity, because this path comes out of a file inside the worktree — which the sandboxed
+      # command can write. A `commondir` rewritten to `/` would otherwise ask docker to bind the
+      # host root into the container. Requiring the marks of a real git directory keeps a
+      # forged pointer from choosing the mount source, and a forged-but-valid one can still only
+      # name a git directory, read-only.
+      if [[ -e "$common/HEAD" && -d "$common/objects" ]]; then
+        GIT_MOUNT+=(-v "$common":"$common":ro)
+        # Normally `worktrees/<name>` is inside the common dir and already covered. With
+        # `--separate-git-dir` it need not be, and a mount that resolves the pointer only
+        # sometimes is worse than one that says what it does.
+        if [[ "$gitdir" != "$common" && "$gitdir" != "$common"/* ]]; then
+          GIT_MOUNT+=(-v "$gitdir":"$gitdir":ro)
+        fi
+      fi
+    fi
+  fi
+fi
+
 CONTAINER_NAME="cordon-run-$$-${RANDOM}"
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via the trap below
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }

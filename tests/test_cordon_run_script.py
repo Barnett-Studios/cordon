@@ -757,3 +757,190 @@ def test_a_symlinked_worktree_is_bound_by_its_real_path(tmp_path):
     assert _work_mount(argv) == str(real.resolve()), (
         f"the mount source must be the real directory, not the link; argv={argv}"
     )
+
+
+# ── cordon#17: a linked worktree's git state must be readable inside the sandbox ──────
+#
+# For `git worktree add`, `.git` is a FILE holding `gitdir: <absolute host path>`. Mounting
+# that file puts the pointer in the container and nothing else, so git resolved it to nothing
+# and no accept could read git state — losing the half of the `.git` decision that says
+# "read-only rather than excluded, so an accept that READS git state still works".
+#
+# The founder decision on cordon#17 chose to mount the parent repository's `.git` read-only at
+# its own host path, over the alternative of documenting the limitation, and to record the cost
+# in CONTRACT.md as part of it. These tests hold both halves: the pointer resolves, and the
+# widening happens only where it is needed.
+
+
+def _mounts(argv):
+    """Every `-v` value docker was handed, in order."""
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "-v" and i + 1 < len(argv)]
+
+
+def _git_repo(path):
+    """A real repository with one commit. Uses the host's git, like _host_git above."""
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    env_args = [
+        "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+        "-c", "commit.gpgsign=false",
+    ]
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "f").write_text("x")
+    subprocess.run(["git", "-C", str(path), *env_args, "add", "f"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), *env_args, "commit", "-q", "-m", "base"], check=True
+    )
+    return path
+
+
+def _linked_worktree(tmp_path, name="linked"):
+    """(main_repo, linked_worktree) — the shape `git worktree add` produces."""
+    import subprocess
+
+    main = _git_repo(tmp_path / "main")
+    linked = tmp_path / name
+    subprocess.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", "-b", "wt", str(linked)],
+        check=True,
+    )
+    assert (linked / ".git").is_file(), "fixture premise: a linked worktree's .git is a FILE"
+    return main, linked
+
+
+def test_a_linked_worktrees_parent_git_is_mounted_at_its_own_path_read_only(tmp_path):
+    main, linked = _linked_worktree(tmp_path)
+    parent_git = str((main / ".git").resolve())
+    rc, err, argv = _run_with_worktree(tmp_path, linked)
+    assert rc == 0, f"err={err!r}"
+    assert f"{parent_git}:{parent_git}:ro" in _mounts(argv), (
+        "the gitdir pointer is absolute, so the parent .git must be bound at its own host "
+        f"path or git resolves it to nothing; mounts={_mounts(argv)}"
+    )
+    assert f"{linked.resolve()}/.git:/work/.git:ro" in _mounts(argv), (
+        "the pointer file itself must still be sealed"
+    )
+
+
+def test_an_ordinary_repository_gains_no_extra_mount(tmp_path):
+    """The negative control, and the one that keeps the read widening honest.
+
+    A plain repository's `.git` is a DIRECTORY already mounted at /work/.git — it needs
+    nothing else, and mounting more would widen the sandbox's read surface for a shape that
+    never had the problem."""
+    repo = _git_repo(tmp_path / "plain")
+    rc, err, argv = _run_with_worktree(tmp_path, repo)
+    assert rc == 0, f"err={err!r}"
+    assert _mounts(argv) == [f"{repo.resolve()}:/work:rw", f"{repo.resolve()}/.git:/work/.git:ro"], (
+        f"an ordinary repo must get exactly the two mounts it always had; {_mounts(argv)}"
+    )
+
+
+def test_a_dangling_gitdir_pointer_mounts_nothing_extra(tmp_path):
+    """`docker run -v` CREATES a missing bind source. A `.git` file naming a path that does
+    not exist must therefore produce no mount at all — otherwise cordon manufactures a
+    directory inside (or in place of) someone's repository, which is the same failure the
+    conditional `.git` mount already exists to avoid."""
+    work = tmp_path / "orphan"
+    work.mkdir()
+    ghost = tmp_path / "nowhere" / ".git" / "worktrees" / "x"
+    (work / ".git").write_text(f"gitdir: {ghost}\n")
+    rc, err, argv = _run_with_worktree(tmp_path, work)
+    assert rc == 0, f"err={err!r}"
+    assert not ghost.exists(), "the dangling pointee must not have been created"
+    assert [m for m in _mounts(argv) if "nowhere" in m] == [], (
+        f"a dangling pointer must add no mount; {_mounts(argv)}"
+    )
+
+
+def test_a_forged_commondir_cannot_choose_the_mount_source(tmp_path):
+    """`commondir` lives inside the git directory, and the sandboxed command has had a turn at
+    the worktree. A pointer rewritten to `/` must not become a bind source: the resolved path
+    has to look like a git directory before it is mounted."""
+    main, linked = _linked_worktree(tmp_path)
+    gitdir = main / ".git" / "worktrees" / "linked"
+    (gitdir / "commondir").write_text("/\n")
+    rc, err, argv = _run_with_worktree(tmp_path, linked)
+    assert rc == 0, f"err={err!r}"
+    assert "/:/:ro" not in _mounts(argv), f"the host root must never be a mount source; {_mounts(argv)}"
+    for m in _mounts(argv):
+        assert not m.startswith("/:"), f"refused source leaked into the mounts: {m}"
+
+
+def test_every_git_mount_stays_read_only(tmp_path):
+    """The seal is the point. Whatever else this resolves, only /work is writable."""
+    main, linked = _linked_worktree(tmp_path)
+    rc, err, argv = _run_with_worktree(tmp_path, linked)
+    assert rc == 0, f"err={err!r}"
+    writable = [m for m in _mounts(argv) if m.endswith(":rw")]
+    assert writable == [f"{linked.resolve()}:/work:rw"], (
+        f"exactly one writable mount, the worktree; got {writable}"
+    )
+
+
+def test_a_relative_gitdir_pointer_becomes_an_absolute_mount_source(tmp_path):
+    """`docker run -v` reads a RELATIVE source as a NAMED VOLUME — the same trap the worktree
+    argument is resolved to avoid. The `.git` file format permits a relative `gitdir:`, so the
+    pointer gets the same treatment: resolved against the worktree, then to a real path."""
+    import os
+
+    main, linked = _linked_worktree(tmp_path)
+    parent_git = (main / ".git").resolve()
+    rel = os.path.relpath(parent_git / "worktrees" / "linked", linked.resolve())
+    (linked / ".git").write_text(f"gitdir: {rel}\n")
+
+    rc, err, argv = _run_with_worktree(tmp_path, linked)
+    assert rc == 0, f"err={err!r}"
+    extra = [m for m in _mounts(argv) if not m.endswith(":/work:rw") and ":/work/.git:ro" not in m]
+    assert extra, f"a relative pointer must still resolve to a mount; {_mounts(argv)}"
+    for m in extra:
+        assert m.startswith("/"), (
+            f"a relative -v source is a NAMED VOLUME to docker, not this directory: {m}"
+        )
+    assert f"{parent_git}:{parent_git}:ro" in extra, f"{extra}"
+
+
+def test_the_pointer_block_is_gated_on_git_being_a_file():
+    """Structural, because behaviour cannot tell the two apart here.
+
+    Running the pointer block against a `.git` DIRECTORY makes it `sed` a directory. BSD sed
+    (macOS, the supported platform today) reads that as empty and says nothing, so the mutant
+    is invisible to every behavioural assertion above — measured, not assumed. GNU sed, on the
+    Linux roadmap platform, writes `read error on …: Is a directory` to the accept command's
+    own stderr. The `-f` guard is what keeps that from ever being reachable, and this is the
+    only place it can be checked."""
+    text = SCRIPT.read_text()
+    assert re.search(r'if\s+\[\[\s+-f\s+"\$WORKTREE/\.git"\s+\]\];\s*then', text), (
+        "the linked-worktree pointer block must be gated on $WORKTREE/.git being a FILE; "
+        "an -e guard also runs it for an ordinary .git directory"
+    )
+
+
+def test_the_mount_source_is_a_resolved_real_path(tmp_path):
+    """`-v` is resolved by the DAEMON, in its own filesystem namespace, so the source must be a
+    real path — the same reason the worktree argument is resolved.
+
+    This is safe to do because git writes the REAL path into `gitdir:` itself (measured: a
+    worktree created through a symlinked directory records the resolved path), so the mount
+    source and the path git looks for agree. A pointer hand-edited to name a symlinked path is
+    the boundary of that agreement, and it is stated in CONTRACT.md rather than silently half-
+    working."""
+    import os
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    main, linked = _linked_worktree(real)
+    # Reach the same worktree through the symlink; the pointer inside it is unchanged.
+    via_link = link / "linked"
+    rc, err, argv = _run_with_worktree(tmp_path, via_link)
+    assert rc == 0, f"err={err!r}"
+    parent_git = str((main / ".git").resolve())
+    assert f"{parent_git}:{parent_git}:ro" in _mounts(argv), (
+        f"the source must be the real directory, not the link; {_mounts(argv)}"
+    )
+    for m in _mounts(argv):
+        src = m.rsplit(":", 2)[0]
+        assert not os.path.islink(src), f"a symlink must never be a bind source: {src}"
