@@ -70,7 +70,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u <invoking uid>:<invoking gid>` | every capability dropped, no escalation, non-root. The uid is read from `id -u`/`id -g`, not fixed: the container writes into a bind-mounted host work tree, so any uid other than the one that owns that tree is a permission error on Linux — where the fixed `1000:1000` only ever worked because Docker Desktop for macOS virtualizes bind-mount ownership. It is not operator-settable, and uid 0 is refused outright rather than run |
 | `--rm` (ephemeral, per command) | no state leaks between runs — matches the per-node ephemeral work tree it mounts |
-| the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. One path is mounted, so a *nested* repository keeps a writable `.git` — scoped below and in cordon#11 |
+| the worktree's own `.git` mounted `:ro` (when present) | `.git` is not data — it is a directory of things the **host** later executes. Writable `.git/hooks/*`, or `core.hooksPath`/`core.fsmonitor`/filter drivers in `.git/config`, give a sandboxed process code execution on the host at the next host-side git operation, outside every flag above. Only the paths reachable from `<worktree>/.git` are mounted — that file or directory, and for a linked worktree the parent repository it points back to — so a repository *nested* anywhere inside the tree keeps a writable `.git` and is not discovered. Scoped below and in cordon#11 |
 
 Only the resource *ceilings* tune (the contract's `limits`); the isolation flags stay
 literal. `tests/test_cordon_run_script.py` enforces both halves without Docker — the fixed
@@ -117,9 +117,69 @@ materialize a spurious `.git/` in a non-repo worktree — turning a plain direct
 broken repo and severing it from any enclosing one. For a worktree that is not a repo,
 cordon adds no mount and makes no claim.
 
-**What this does not cover — 1: any other repository.** The mount is a single path,
-`<worktree>/.git`. Closing it closes host execution via git *for the repository cordon was
-handed*, and for no other. A vendored clone at `sub/` keeps a writable `sub/.git`, and a
+**A linked worktree also mounts its parent repository's `.git`, read-only.** For a
+`git worktree add` worktree, `.git` is a *file* holding `gitdir: <absolute host path>`. Mounting
+that file alone put the pointer in the container and nothing it points at, so git answered
+`fatal: not a git repository: …/worktrees/<name>` and no accept could read git state — the
+guarantee above ("read-only rather than excluded, so an accept that reads git state still works")
+did not hold for that shape. The objects live in the parent repository, and
+`worktrees/<name>/commondir` points back to it, so mounting only `worktrees/<name>` is not enough.
+cordon now binds the resolved common git directory at its **own host path**, read-only, because
+the pointer inside the file is absolute (cordon#17).
+
+**The cost, stated because it is a real widening of the read surface.** A sandboxed command in a
+linked worktree can read the *whole* repository's git directory. On a harness that provisions
+each node as a linked worktree of one shared repository, every node's baseline is in that one
+object store, so **every other node's content is readable from inside any node's sandbox** —
+`git log --all` inside one worktree lists a sibling worktree's commits. This is measured, not
+inferred. Read-only does not narrow it and nothing narrower works. If a consumer needs a node to
+see its own baseline and nothing else, provision it as a standalone repository (`git init` into a
+fresh directory with one baseline commit), which is what the known driving harness does and which
+mounts nothing beyond that node.
+
+What the widening does *not* cost is the seal. Every added mount is `:ro`, including the
+**shared** `hooks/` directory a linked worktree uses — which lives in the parent and is now
+explicitly read-only rather than merely unreachable; a write to it is refused by the filesystem.
+Only `/work` is writable, in either shape.
+
+**"Its parent repository" is verified, not assumed.** The `.git` pointer file lives in `/work` —
+the one **writable** mount — so a sandboxed command that ran over a directory with no `.git` can
+write one, and a later run would otherwise bind whatever it named. Requiring only the marks of a
+git directory (`HEAD`, `objects/`) does not close that: the forged target *is* a git directory.
+
+So cordon requires the **back-pointer**. `git worktree add` writes both halves —
+`<worktree>/.git` names `<parent>/.git/worktrees/<name>`, and
+`<parent>/.git/worktrees/<name>/gitdir` names `<worktree>/.git` back — and cordon mounts only when
+they agree. The forward half is writable from inside the sandbox; the back half is not, because
+writing it means already holding write access to the repository being named.
+
+cordon also still refuses when the pointer dangles (`docker run -v` would create the missing
+source, inside someone's repository) and when the resolved common directory does not look like a
+git directory, which keeps a `commondir` rewritten to `/` from naming the host root even for a
+worktree whose back-pointer is genuine.
+
+**What this costs: `--separate-git-dir` gets the pointer file and nothing more.**
+`git init --separate-git-dir=<path>` writes no back-pointer in `<path>` and no `core.worktree` in
+its config, so from the host that shape is **indistinguishable from a forgery** — it is exactly
+what a forgery imitates. cordon does not widen the read surface for it: `.git` is mounted read-only
+as the file it is, and a command needing git state in that shape sees the same
+`fatal: not a git repository` a linked worktree saw before cordon#17. Stated here rather than left
+to be discovered, and asserted in `tests/test_cordon_run_script.py` — including the fixture premise,
+so if a future git starts writing that back-pointer the test fails rather than quietly recording a
+limitation that no longer exists.
+
+One boundary, stated rather than left to be discovered: the mount source is a **resolved real
+path**, because `-v` is resolved by the daemon in its own filesystem namespace. git writes the
+resolved path into `gitdir:` itself — a worktree created through a symlinked directory records the
+real path, measured — so the mount and the path git looks for agree for every worktree git
+creates. A `.git` file *hand-edited* to name a symlinked path is outside that agreement: git looks
+for the symlinked path, which is not what was mounted, and the run fails exactly as it did before
+this fix. cordon makes no claim there.
+
+**What this does not cover — 1: any other repository.** What is mounted is reached from
+`<worktree>/.git` and nothing else — that file or directory, plus the parent repository a linked
+worktree's pointer names. Nothing walks the tree looking for other repositories. Closing this
+closes host execution via git *for the repository cordon was handed*, and for no other. A vendored clone at `sub/` keeps a writable `sub/.git`, and a
 container that appends `[core] hooksPath` there gets host execution the next time the host runs
 git inside `sub/`. A **local** `core.hooksPath` outranks a global one, so a `~/.git-hooks`
 installed repo-wide — as dotclaude installs one — does not mitigate the config variant.
