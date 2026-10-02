@@ -501,15 +501,46 @@ def test_safe_directory_is_set_via_env_for_the_worktree():
     assert "-e GIT_CONFIG_VALUE_0=/work" in block
 
 
-def test_safe_directory_does_not_relax_the_git_dir_write_seal():
+def test_safe_directory_value_is_exactly_work_not_a_wildcard_or_derived(tmp_path):
+    """The relaxation must be scoped to exactly the one path this script mounts the
+    worktree at, through the REAL invocation (stubbed docker, real argv) rather than
+    a text search that a value built from a shell expansion could still satisfy.
+
+    `safe.directory=*` would trust ANY directory's ownership inside the container —
+    a blanket grant this script has no business making on the operator's behalf, and
+    strictly broader than the one gap cordon#19 is about. A value built from
+    `$WORKTREE` or similar would still read as a literal `/work` in the script's own
+    source text (defeating a `grep`-only check) while actually varying per
+    invocation — untestable without running it, which is why this test runs it."""
+    repo = _git_repo(tmp_path / "plain")
+    rc, err, argv = _run_with_worktree(tmp_path, repo)
+    assert rc == 0, f"err={err!r}"
+    assert "-e" in argv, f"no -e flag reached docker at all; argv={argv}"
+    env_flags = [argv[i + 1] for i, a in enumerate(argv) if a == "-e" and i + 1 < len(argv)]
+    value_flags = [f for f in env_flags if f.startswith("GIT_CONFIG_VALUE_0=")]
+    assert value_flags == ["GIT_CONFIG_VALUE_0=/work"], (
+        f"GIT_CONFIG_VALUE_0 must be exactly '/work', never '*' and never an "
+        f"expansion that happens to print the same text; got {value_flags}"
+    )
+
+
+def test_safe_directory_does_not_relax_the_git_dir_write_seal(tmp_path):
     """The fix must not buy git reads by widening the write surface `.git` read-only
-    is there to close — `safe.directory` only silences an ownership check, and the
-    read-only bind from `test_rc1_git_dir_is_mounted_read_only` must still be exactly
-    as asserted there, unconditionally, regardless of the new -e flags."""
-    text = SCRIPT.read_text()
-    assert re.search(r'/\.git["\']?:/work/\.git:ro', text)
-    assert ":/work:rw" in text
-    assert ":/work:rw,ro" not in text and ":rw:ro" not in text
+    is there to close. Through the real invocation: the worktree mount is the ONLY
+    `rw` mount docker receives, and the `.git` mount stays `:ro` — the new `-e` flags
+    change nothing about which mounts are writable."""
+    repo = _git_repo(tmp_path / "plain")
+    rc, err, argv = _run_with_worktree(tmp_path, repo)
+    assert rc == 0, f"err={err!r}"
+    mounts = _mounts(argv)
+    writable = [m for m in mounts if m.endswith(":rw")]
+    assert writable == [f"{repo.resolve()}:/work:rw"], (
+        f"exactly one writable mount, the worktree itself; got {writable}"
+    )
+    git_mounts = [m for m in mounts if ".git" in m]
+    assert git_mounts and all(m.endswith(":ro") for m in git_mounts), (
+        f"every .git mount must stay read-only; got {git_mounts}"
+    )
 
 
 # ── positive control for the live escape smokes ──────────────────────────────────
