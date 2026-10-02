@@ -214,12 +214,18 @@ CONTAINER_NAME="cordon-run-$$-${RANDOM}"
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
-# The container user must MATCH the bind-mounted worktree's owner, not a fixed number.
-# `-u 1000:1000` worked only because Docker Desktop for macOS virtualizes bind-mount
-# ownership; on Linux — the roadmap platform, and every VPS — uid 1000 reading a worktree
-# owned by uid 501 or 1001 gets permission denied, and the accept command fails for a
-# reason that has nothing to do with the code under test (cordon#3). The same mismatch also
-# makes `git` inside the sandbox refuse the worktree as "dubious ownership".
+# The container user is the INVOKING user, not a fixed number. `-u 1000:1000` worked
+# only because Docker Desktop for macOS virtualizes bind-mount ownership; on Linux — the
+# roadmap platform, and every VPS — uid 1000 reading a worktree owned by uid 501 or 1001
+# gets permission denied, and the accept command fails for a reason that has nothing to
+# do with the code under test (cordon#3).
+#
+# It does NOT follow that this MATCHES what the runtime reports the mount as owned by.
+# On a bind-mount-virtualizing runtime (colima, Docker Desktop — measured on both), the
+# mount can show up inside the container as uid 0 regardless of the invoker's own uid,
+# and `git` then refuses every read in the sandbox as "dubious ownership" — see the
+# `-e GIT_CONFIG_*` flags on the `docker run` invocation below, which are what actually
+# close that gap (cordon#19); matching the invoker was never going to.
 #
 # This is NOT an env seam: the value comes from `id`, so an operator cannot weaken the
 # posture by exporting something. The posture it must preserve is *non-root*, and matching
@@ -234,6 +240,13 @@ if [[ "$CONTAINER_UID" -eq 0 ]]; then
   exit 1
 fi
 
+# `safe.directory=/work`, through the environment — no file written, no image layer
+# changed, and nothing an operator can use to weaken the posture (the three values are
+# fixed here, not read from an env seam the way the resource ceilings are). This
+# relaxes git's ownership CHECK only — a sandboxed process still cannot write `.git`
+# (cordon#2's read-only shadow above is unaffected) — so "an accept that reads git
+# state still works" holds even on a runtime where CONTAINER_UID cannot match a
+# remapped mount (cordon#19).
 start=$(date +%s)
 rc=0
 "$TIMEOUT_BIN" --signal=TERM --kill-after="$CORDON_KILL_AFTER" "$CORDON_TIMEOUT" \
@@ -250,6 +263,9 @@ rc=0
     --cpus "$CORDON_CPUS" \
     --pids-limit "$CORDON_PIDS" \
     -u "$CONTAINER_UID:$CONTAINER_GID" \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/work \
     -v "$WORKTREE":/work:rw \
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
     -w /work \

@@ -40,6 +40,9 @@ FIXED_POSTURE_DOCKER_FLAGS = {
     "-u",
     "-v",
     "-w",
+    # cordon#19: `safe.directory=/work` via env, not a file write and not operator
+    # tunable — the values are hardcoded, not read from CORDON_* like the ceilings are.
+    "-e",
 }
 TUNABLE_CEILING_DOCKER_FLAGS = {"--memory", "--cpus", "--pids-limit"}
 
@@ -479,6 +482,34 @@ def test_rc1_git_mount_is_conditional_on_git_existing():
     assert re.search(r'if\s+\[\[\s+-[ed]\s+"\$WORKTREE/\.git"', text), (
         "the .git mount must be conditional on $WORKTREE/.git existing"
     )
+
+
+# ── cordon#19: `git` refuses the mount as dubious ownership on a runtime that
+# remaps bind-mount ownership (colima, Docker Desktop) ──────────────────────────
+
+def test_safe_directory_is_set_via_env_for_the_worktree():
+    """`CONTAINER_UID=$(id -u)` matches the INVOKER, not whatever a bind-mount-
+    virtualizing runtime reports the mount as owned by (colima/Docker Desktop present
+    it as uid 0). `git` then refuses every read inside the sandbox as "dubious
+    ownership" — unrelated to the code under test. `safe.directory` relaxes that
+    ownership *check* only; it grants no write and costs nothing to set
+    unconditionally, through the environment so no file is written and no image
+    layer changes."""
+    block = _docker_run_block()
+    assert "-e GIT_CONFIG_COUNT=1" in block
+    assert "-e GIT_CONFIG_KEY_0=safe.directory" in block
+    assert "-e GIT_CONFIG_VALUE_0=/work" in block
+
+
+def test_safe_directory_does_not_relax_the_git_dir_write_seal():
+    """The fix must not buy git reads by widening the write surface `.git` read-only
+    is there to close — `safe.directory` only silences an ownership check, and the
+    read-only bind from `test_rc1_git_dir_is_mounted_read_only` must still be exactly
+    as asserted there, unconditionally, regardless of the new -e flags."""
+    text = SCRIPT.read_text()
+    assert re.search(r'/\.git["\']?:/work/\.git:ro', text)
+    assert ":/work:rw" in text
+    assert ":/work:rw,ro" not in text and ":rw:ro" not in text
 
 
 # ── positive control for the live escape smokes ──────────────────────────────────
