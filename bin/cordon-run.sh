@@ -221,11 +221,15 @@ trap cleanup EXIT INT TERM
 # do with the code under test (cordon#3).
 #
 # It does NOT follow that this MATCHES what the runtime reports the mount as owned by.
-# On a bind-mount-virtualizing runtime (colima, Docker Desktop — measured on both), the
-# mount can show up inside the container as uid 0 regardless of the invoker's own uid,
-# and `git` then refuses every read in the sandbox as "dubious ownership" — see the
-# `-e GIT_CONFIG_*` flags on the `docker run` invocation below, which are what actually
-# close that gap (cordon#19); matching the invoker was never going to.
+# cordon#19 measured this on Docker Desktop and on colima: both showed /work as uid 0
+# inside the container regardless of the invoker's own uid, and `git` then refused
+# every read in the sandbox as "dubious ownership". Runtime-dependent, not a fixed
+# property of colima specifically: a different colima install, measured directly for
+# this fix's own verification, instead reported the mount's owner as whoever was
+# CURRENTLY accessing it — trivially matching CONTAINER_UID and never hitting this
+# failure at all on that install. Either way, matching the invoker was never going to
+# be reliable — see the `-e GIT_CONFIG_*` flags on the `docker run` invocation below,
+# which are what actually close the gap (cordon#19).
 #
 # This is NOT an env seam: the value comes from `id`, so an operator cannot weaken the
 # posture by exporting something. The posture it must preserve is *non-root*, and matching
