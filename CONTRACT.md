@@ -39,12 +39,18 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
 - **limits** — the resource ceilings, via env: `CORDON_MEMORY` (default `2g`),
   `CORDON_CPUS` (default `2`), `CORDON_PIDS` (default `512`), plus a wall-clock bound
   `CORDON_TIMEOUT` (default `300` seconds, with `CORDON_KILL_AFTER` grace default `10`).
-  Each must be a positive value — cordon refuses, with exit 1 before `docker run` is
-  reached, any value Docker or coreutils themselves read as *unlimited*: `CORDON_TIMEOUT=0`
-  (GNU `timeout`'s own disabling value), `CORDON_PIDS=0` or `-1`, `CORDON_CPUS=0`, and
-  `CORDON_MEMORY=0` with or without a unit suffix (`0`, `0g`, `0m`, …). An operator or a
-  calling harness typing the value that reads as *most restrictive* must not silently get
-  the opposite (cordon#18).
+  Each must match a strict positive shape — cordon refuses, with exit 1 before `docker run`
+  is reached, anything that does not: `CORDON_TIMEOUT` a positive number with an optional
+  `s|m|h|d` suffix (GNU `timeout`'s own grammar); `CORDON_CPUS` a positive decimal;
+  `CORDON_MEMORY` a positive number with an optional `b|k|m|g[b]` suffix
+  (case-insensitive — docker's `--memory` grammar); `CORDON_PIDS` a positive integer. This
+  is a **whitelist**, not an enumeration of disabling values to reject: a first cut checked
+  specific sentinels (`0`, `-1`, one stripped unit) and was itself bypassable —
+  `0s`/`0m`/`0h` disable `timeout` exactly like bare `0`; `0.0`/`.0`/`0.`/`00` are zero CPUs
+  the exact-`"0"` check never saw; `0gb`/`0mb`/`0KiB`/`0.0g` are zero (or an unrecognised)
+  memory the single-unit strip never saw; `-2` and a leading-space `" 0"` are PIDS values
+  outside the two spellings checked. Matching the grammar outright, rather than enumerating
+  what breaks it, does not need to anticipate the next bypass shape (cordon#18).
 
 ### The artifact that carries the guarantees is the script, not the image
 

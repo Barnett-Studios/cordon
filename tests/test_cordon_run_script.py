@@ -4,6 +4,8 @@ without weakening any security flag. No Docker needed to run this test."""
 import pathlib
 import re
 
+import pytest
+
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "bin" / "cordon-run.sh"
 
 # The fixed security posture — must appear verbatim, never parameterized away.
@@ -189,6 +191,64 @@ def test_a_real_memory_ceiling_is_not_mistaken_for_a_disabling_value(tmp_path):
     )
     assert rc == 0, f"ordinary ceilings must not be refused; stderr={err!r}"
     assert docker_argv, "docker must run when every ceiling is a real, positive value"
+
+
+# ── Review round 2: enumeration was itself bypassable — a whitelist instead ──────────
+#
+# The first cut enumerated specific disabling spellings (bare "0", "-1") and stripped one
+# optional unit. Each of these still reaches docker unrefused under that enumeration:
+# GNU `timeout` also disables on "0s"/"0m"/"0h" (not just bare "0"); "0.0"/".0"/"0."/"00"
+# are all zero CPUs the bare-"0" check never saw; "0gb"/"0mb"/"0KiB"/"0.0g" are all zero (or
+# an unrecognised unit) memory the single-unit strip never saw; "-2" and a leading-space
+# " 0" are PIDS values the exact "-1"/"0" check never saw. A whitelist does not need to
+# anticipate the shape of a sentinel, only the shape of a value that is not one — so every
+# one of these, including ones the issue never named, must be refused by the same rule.
+BYPASS_CASES = [
+    ("CORDON_TIMEOUT", "0s"),
+    ("CORDON_TIMEOUT", "0m"),
+    ("CORDON_TIMEOUT", "0h"),
+    ("CORDON_TIMEOUT", "0.0"),
+    ("CORDON_CPUS", "0.0"),
+    ("CORDON_CPUS", ".0"),
+    ("CORDON_CPUS", "0."),
+    ("CORDON_CPUS", "00"),
+    ("CORDON_MEMORY", "0gb"),
+    ("CORDON_MEMORY", "0mb"),
+    ("CORDON_MEMORY", "0KiB"),
+    ("CORDON_MEMORY", "0.0g"),
+    ("CORDON_PIDS", "-2"),
+    ("CORDON_PIDS", " 0"),
+]
+
+
+@pytest.mark.parametrize("var,value", BYPASS_CASES, ids=[f"{v}={x}" for v, x in BYPASS_CASES])
+def test_whitelist_catches_every_bypass_the_enumeration_missed(tmp_path, var, value):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {var: value})
+    assert rc != 0, f"{var}={value!r} must be refused; stderr={err!r}"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert var in err, f"stderr must name the var: {err!r}"
+
+
+VALID_SHAPES = [
+    ("CORDON_TIMEOUT", "300"),
+    ("CORDON_TIMEOUT", "5m"),
+    ("CORDON_TIMEOUT", "1.5h"),
+    ("CORDON_CPUS", "2"),
+    ("CORDON_CPUS", "0.5"),
+    ("CORDON_MEMORY", "2g"),
+    ("CORDON_MEMORY", "1.5gb"),
+    ("CORDON_MEMORY", "1000000"),
+    ("CORDON_PIDS", "512"),
+]
+
+
+@pytest.mark.parametrize("var,value", VALID_SHAPES, ids=[f"{v}={x}" for v, x in VALID_SHAPES])
+def test_whitelist_still_accepts_every_documented_valid_shape(tmp_path, var, value):
+    """The control for the whitelist itself: tightening the grammar must not reject a
+    legitimate value in any of the forms each flag's own documentation allows."""
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {var: value})
+    assert rc == 0, f"{var}={value!r} is a valid shape and must not be refused; stderr={err!r}"
+    assert docker_argv, f"docker must run for a valid ceiling; {var}={value!r}"
 
 
 def test_security_flags_are_not_env_parameterized():
