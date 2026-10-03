@@ -80,6 +80,35 @@ CORDON_PIDS="${CORDON_PIDS:-512}"
 CORDON_TIMEOUT="${CORDON_TIMEOUT:-300}"
 CORDON_KILL_AFTER="${CORDON_KILL_AFTER:-10}"
 
+# `${VAR:-default}` only defends against UNSET or empty. It cannot defend against a value
+# that is PRESENT and means the opposite of what it looks like — these are Docker's and
+# coreutils' own "unlimited" sentinels (`--memory 0`, `--pids-limit 0` or `-1`, `--cpus 0`,
+# GNU `timeout 0`), reachable from any env an operator or a calling harness sets (cordon#18).
+# An operator hardening a batch by typing CORDON_MEMORY=0 or CORDON_PIDS=0 gets the OPPOSITE
+# of hardened, silently. Same posture as the missing-`timeout`-binary check below: fail
+# loudly rather than drop the guarantee without saying so.
+reject_ceiling() {
+  echo "cordon: \$${1}=${2} disables that ceiling — docker/coreutils read this value as" \
+       "UNLIMITED, not as a tight limit. Refusing rather than silently running unbounded;" \
+       "set a positive value." >&2
+  exit 1
+}
+if [[ "$CORDON_TIMEOUT" =~ ^[0-9]+$ ]] && [[ "$CORDON_TIMEOUT" -eq 0 ]]; then
+  reject_ceiling CORDON_TIMEOUT "$CORDON_TIMEOUT"
+fi
+if [[ "$CORDON_PIDS" =~ ^-?[0-9]+$ ]] && { [[ "$CORDON_PIDS" -eq 0 ]] || [[ "$CORDON_PIDS" -eq -1 ]]; }; then
+  reject_ceiling CORDON_PIDS "$CORDON_PIDS"
+fi
+if [[ "$CORDON_CPUS" == "0" ]]; then
+  reject_ceiling CORDON_CPUS "$CORDON_CPUS"
+fi
+# Strip an optional trailing unit letter (b/k/m/g, case-insensitive) before checking for
+# zero — "0", "0g", "0M" all mean unlimited to `--memory`, same as the bare "0".
+CORDON_MEMORY_NUMERIC="${CORDON_MEMORY%[bBkKmMgG]}"
+if [[ "$CORDON_MEMORY_NUMERIC" =~ ^[0-9]+$ ]] && [[ "$CORDON_MEMORY_NUMERIC" -eq 0 ]]; then
+  reject_ceiling CORDON_MEMORY "$CORDON_MEMORY"
+fi
+
 # coreutils `timeout` is required to honor the wall-clock bound. macOS ships it as
 # `gtimeout` (brew install coreutils). Without it the "never an unbounded hang"
 # contract cannot be kept, so fail loudly rather than silently drop the guarantee.

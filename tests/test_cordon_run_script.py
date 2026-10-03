@@ -118,6 +118,79 @@ def test_resource_ceilings_are_env_overridable_with_hardened_defaults():
     assert '--pids-limit "$CORDON_PIDS"' in text
 
 
+# ── Disabling sentinels must be refused, not silently honoured (cordon#18) ────────────
+#
+# `${VAR:-default}` only defends against unset/empty. Docker's and coreutils' own
+# "unlimited" values — `--memory 0`, `--pids-limit 0`/`-1`, `--cpus 0`, `timeout 0` — are
+# PRESENT values that mean the opposite of what they look like, and none of these four
+# ceilings ever checked for them. Behavioural, not textual, same reasoning as the
+# wall-clock tests above: a refusal must happen before `docker run` is ever reached, so
+# the assertion is "docker's log is empty", not a string in the source.
+def _run_ceiling_env(tmp_path, env_extra):
+    """Like `_run_stubbed`, but with a passthrough `timeout` stub (the ceiling check
+    happens before `timeout` is even invoked, so its body does not matter here)."""
+    return _run_stubbed(tmp_path, _TIMEOUT_PASSTHROUGH, env_extra)
+
+
+def test_cordon_timeout_zero_is_refused_not_treated_as_unlimited(tmp_path):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_TIMEOUT": "0"})
+    assert rc != 0, "CORDON_TIMEOUT=0 (GNU timeout's own disabling value) must be refused"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_TIMEOUT" in err and "0" in err, f"stderr must name the var and value: {err!r}"
+
+
+def test_cordon_pids_zero_is_refused_not_treated_as_unlimited(tmp_path):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_PIDS": "0"})
+    assert rc != 0, "CORDON_PIDS=0 (docker's own disabling value) must be refused"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_PIDS" in err, f"stderr must name the var: {err!r}"
+
+
+def test_cordon_pids_negative_one_is_refused_not_treated_as_unlimited(tmp_path):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_PIDS": "-1"})
+    assert rc != 0, "CORDON_PIDS=-1 (docker's other disabling value) must be refused"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_PIDS" in err, f"stderr must name the var: {err!r}"
+
+
+def test_cordon_cpus_zero_is_refused_not_treated_as_unlimited(tmp_path):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_CPUS": "0"})
+    assert rc != 0, "CORDON_CPUS=0 (docker's own disabling value) must be refused"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_CPUS" in err, f"stderr must name the var: {err!r}"
+
+
+def test_cordon_memory_zero_is_refused_not_treated_as_unlimited(tmp_path):
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_MEMORY": "0"})
+    assert rc != 0, "CORDON_MEMORY=0 (docker's own disabling value) must be refused"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_MEMORY" in err, f"stderr must name the var: {err!r}"
+
+
+def test_cordon_memory_zero_with_a_unit_suffix_is_refused_too(tmp_path):
+    """The sharpest case from the issue: `0g` reads as "disabled", not "0 gigabytes", to
+    anyone who does not already know Docker's memory-flag grammar."""
+    rc, docker_argv, _, err = _run_ceiling_env(tmp_path, {"CORDON_MEMORY": "0g"})
+    assert rc != 0, "CORDON_MEMORY=0g must be refused exactly like bare 0"
+    assert not docker_argv, f"docker must never run on a rejected ceiling; argv={docker_argv}"
+    assert "CORDON_MEMORY" in err, f"stderr must name the var: {err!r}"
+
+
+def test_a_real_memory_ceiling_is_not_mistaken_for_a_disabling_value(tmp_path):
+    """The control: an ordinary non-zero ceiling on every var must still reach docker."""
+    rc, docker_argv, _, err = _run_ceiling_env(
+        tmp_path,
+        {
+            "CORDON_TIMEOUT": "60",
+            "CORDON_PIDS": "128",
+            "CORDON_CPUS": "1",
+            "CORDON_MEMORY": "512m",
+        },
+    )
+    assert rc == 0, f"ordinary ceilings must not be refused; stderr={err!r}"
+    assert docker_argv, "docker must run when every ceiling is a real, positive value"
+
+
 def test_security_flags_are_not_env_parameterized():
     """Regression guard on the env seam: no security flag may be swapped for a
     variable — only the resource ceilings are tunable."""
