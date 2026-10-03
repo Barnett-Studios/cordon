@@ -80,6 +80,71 @@ CORDON_PIDS="${CORDON_PIDS:-512}"
 CORDON_TIMEOUT="${CORDON_TIMEOUT:-300}"
 CORDON_KILL_AFTER="${CORDON_KILL_AFTER:-10}"
 
+# `${VAR:-default}` only defends against UNSET or empty. It cannot defend against a value
+# that is PRESENT and means the opposite of what it looks like. A first cut enumerated the
+# specific disabling sentinels (bare `0`, `-1`) and stripped one optional unit before
+# checking for zero — and was itself bypassable (review round 2, cordon#18): `0s`/`0m`/`0h`
+# (GNU `timeout` disables on those too, not just a bare `0`), `0.0`/`.0`/`0.`/`00` for CPUS,
+# `0gb`/`0mb`/`0KiB`/`0.0g` for MEMORY (a decimal magnitude, or a unit the enumeration never
+# listed), `-2` or a leading-space `" 0"` for PIDS. Enumerating bypasses is an arms race one
+# of them will always win; a WHITELIST does not need to anticipate the shape of a sentinel,
+# only recognise the shape of a value that is not one.
+#
+# Each ceiling must match a strict POSITIVE shape outright. Anything that does not —
+# including a disabling sentinel, a unit docker/coreutils do not even recognise, or a stray
+# leading space — is refused, named with its value. No value reaches docker unvalidated.
+reject_ceiling() {
+  echo "cordon: \$${1}=${2} is not a valid positive ${3} — refusing rather than passing an" \
+       "unvalidated value to docker/coreutils. ${4}" >&2
+  exit 1
+}
+
+# Zero in any of the shapes each grammar accepts (bare, decimal, unit-suffixed) is still
+# zero — awk compares the numeric value, not the string, so "0", "0.0", "00" and "0s" (unit
+# already stripped by the caller) are caught uniformly rather than one enumerated spelling
+# at a time.
+is_zero() { [[ "$(awk -v n="$1" 'BEGIN { print (n == 0) ? "1" : "0" }')" == "1" ]]; }
+
+# TIMEOUT: a positive number with an optional s|m|h|d unit — GNU `timeout`'s own grammar.
+if [[ ! "$CORDON_TIMEOUT" =~ ^[0-9]+(\.[0-9]+)?[smhd]?$ ]]; then
+  reject_ceiling CORDON_TIMEOUT "$CORDON_TIMEOUT" "duration" \
+    "Expected a positive number with an optional s|m|h|d suffix."
+fi
+if is_zero "$(printf '%s' "$CORDON_TIMEOUT" | sed -E 's/[smhd]$//')"; then
+  reject_ceiling CORDON_TIMEOUT "$CORDON_TIMEOUT" "duration" \
+    "0 disables the timeout in GNU timeout's own grammar."
+fi
+
+# CPUS: a positive decimal — docker's --cpus grammar (e.g. "0.5", "2").
+if [[ ! "$CORDON_CPUS" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  reject_ceiling CORDON_CPUS "$CORDON_CPUS" "cpu count" \
+    "Expected a positive decimal number (e.g. 2 or 0.5)."
+fi
+if is_zero "$CORDON_CPUS"; then
+  reject_ceiling CORDON_CPUS "$CORDON_CPUS" "cpu count" "0 means unlimited to docker's --cpus."
+fi
+
+# MEMORY: a positive number with an optional b|k|m|g unit, each optionally followed by a
+# literal 'b' (b, k, kb, m, mb, g, gb — case-insensitive) — docker's --memory grammar. A
+# unit it does not recognise (e.g. "KiB") simply fails this shape, same as a disabling one.
+if [[ ! "$CORDON_MEMORY" =~ ^[0-9]+(\.[0-9]+)?([bBkKmMgG][bB]?)?$ ]]; then
+  reject_ceiling CORDON_MEMORY "$CORDON_MEMORY" "memory size" \
+    "Expected a positive number with an optional b|k|m|g[b] suffix (case-insensitive)."
+fi
+if is_zero "$(printf '%s' "$CORDON_MEMORY" | sed -E 's/[bBkKmMgG][bB]?$//')"; then
+  reject_ceiling CORDON_MEMORY "$CORDON_MEMORY" "memory size" \
+    "0 (with or without a unit) means unlimited to docker's --memory."
+fi
+
+# PIDS: a positive integer — docker's --pids-limit grammar. No sign, no decimal, no unit.
+if [[ ! "$CORDON_PIDS" =~ ^[0-9]+$ ]]; then
+  reject_ceiling CORDON_PIDS "$CORDON_PIDS" "pid count" "Expected a positive integer."
+fi
+if is_zero "$CORDON_PIDS"; then
+  reject_ceiling CORDON_PIDS "$CORDON_PIDS" "pid count" \
+    "0 means unlimited to docker's --pids-limit (as does -1, already refused by the shape above)."
+fi
+
 # coreutils `timeout` is required to honor the wall-clock bound. macOS ships it as
 # `gtimeout` (brew install coreutils). Without it the "never an unbounded hang"
 # contract cannot be kept, so fail loudly rather than silently drop the guarantee.

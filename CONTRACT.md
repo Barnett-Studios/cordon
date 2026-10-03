@@ -39,6 +39,18 @@ cordon-run.sh <worktree-path> <runtime-image> <command...>
 - **limits** — the resource ceilings, via env: `CORDON_MEMORY` (default `2g`),
   `CORDON_CPUS` (default `2`), `CORDON_PIDS` (default `512`), plus a wall-clock bound
   `CORDON_TIMEOUT` (default `300` seconds, with `CORDON_KILL_AFTER` grace default `10`).
+  Each must match a strict positive shape — cordon refuses, with exit 1 before `docker run`
+  is reached, anything that does not: `CORDON_TIMEOUT` a positive number with an optional
+  `s|m|h|d` suffix (GNU `timeout`'s own grammar); `CORDON_CPUS` a positive decimal;
+  `CORDON_MEMORY` a positive number with an optional `b|k|m|g[b]` suffix
+  (case-insensitive — docker's `--memory` grammar); `CORDON_PIDS` a positive integer. This
+  is a **whitelist**, not an enumeration of disabling values to reject: a first cut checked
+  specific sentinels (`0`, `-1`, one stripped unit) and was itself bypassable —
+  `0s`/`0m`/`0h` disable `timeout` exactly like bare `0`; `0.0`/`.0`/`0.`/`00` are zero CPUs
+  the exact-`"0"` check never saw; `0gb`/`0mb`/`0KiB`/`0.0g` are zero (or an unrecognised)
+  memory the single-unit strip never saw; `-2` and a leading-space `" 0"` are PIDS values
+  outside the two spellings checked. Matching the grammar outright, rather than enumerating
+  what breaks it, does not need to anticipate the next bypass shape (cordon#18).
 
 ### The artifact that carries the guarantees is the script, not the image
 
@@ -66,7 +78,7 @@ These flags are **not** parameterizable — they are the component's reason to e
 | `--network none` | the `accept` check is local; egress is removed, not filtered — a phone-home fails deterministically instead of silently succeeding against an unintended dependency |
 | `--memory / --cpus / --pids-limit` | a runaway test (fork bomb, unbounded alloc) is OOM-/pid-killed — a bounded non-zero exit, never an unbounded hang |
 | `--memory-swap` pinned equal to `--memory` | without it Docker grants swap up to 2x `--memory`, so a runaway allocation escapes the ceiling on any host with swap instead of being OOM-killed. Not a ceiling — the thing that stops the ceiling being soft, which is why it is here and not in `limits` |
-| wall-clock `timeout` (`CORDON_TIMEOUT`, default 300s) | a busy loop that never trips memory/pid limits (`--cpus` only throttles it) is killed at the deadline via coreutils `timeout`; the container is reaped by a `docker rm -f` cleanup trap. cordon exits **124** (the coreutils timeout convention) — distinct from Docker's 137 OOM/SIGKILL |
+| wall-clock `timeout` (`CORDON_TIMEOUT`, default 300s) | a busy loop that never trips memory/pid limits (`--cpus` only throttles it) is killed at the deadline **plus the `CORDON_KILL_AFTER` grace** (default 10s, so 310s total at the defaults) via coreutils `timeout`; the container is reaped by a `docker rm -f` cleanup trap. The grace is consumed unconditionally — measured (cordon#18) even when the containerized command installs its own `SIGTERM` handler that would exit immediately, so a caller budgeting a batch against this number must budget `CORDON_TIMEOUT + CORDON_KILL_AFTER`, not `CORDON_TIMEOUT` alone. cordon exits **124** (the coreutils timeout convention) — distinct from Docker's 137 OOM/SIGKILL |
 | `--read-only --tmpfs /tmp` | the only writable surface is the disposable work tree + scratch |
 | `--cap-drop ALL --security-opt no-new-privileges -u <invoking uid>:<invoking gid>` | every capability dropped, no escalation, non-root. The uid is read from `id -u`/`id -g`, not fixed: on native Linux a bind mount preserves the host's own uid exactly, so any uid other than the one that owns that tree is a kernel-level permission error — where the fixed `1000:1000` only ever worked because Docker Desktop for macOS virtualizes bind-mount ownership. A *virtualizing* runtime can defeat this flag's own premise in more than one way — cordon#19 measured Docker Desktop presenting the mount as uid 0 regardless of the invoker's own uid, and a colima install in this family's own QA session measured a THIRD behavior again (see the `safe.directory` row below) — so this flag's guarantee ("matches the invoker") holds on native Linux and is not something a virtualizing runtime can be assumed to preserve. It is not operator-settable, and uid 0 is refused outright rather than run |
 | `--rm` (ephemeral, per command) | no state leaks between runs — matches the per-node ephemeral work tree it mounts |
